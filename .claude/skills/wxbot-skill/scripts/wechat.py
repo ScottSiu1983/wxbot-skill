@@ -14,6 +14,8 @@ wechat.py — 统一 WeChat 自动化 CLI
 所有截图/OCR/导航在本脚本内部完成，不暴露中间状态给 Claude。
 """
 
+__version__ = "0.1-beta"
+
 import argparse
 import contextlib
 import fcntl
