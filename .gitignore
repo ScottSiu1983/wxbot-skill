@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+.claude/skills/wechat-bot/debug/
+.claude/skills/wechat-bot/.wechat_ui.lock
+.claude/settings.local.json
+config.json
+/tmp/
+*.log
