@@ -1,5 +1,5 @@
 ---
-name: wechat-bot
+name: wxbot-skill
 description: "当用户提到微信、WeChat、回复消息、查看聊天、发消息给某人、群聊、回复群、给某个群回复、操作联系人、或任何涉及聊天消息自动化的任务时使用此技能。触发关键词包括但不限于：微信、群、群聊、聊天、回复、发送、消息、WeChat。即使用户没有明确说'微信'二字，只要涉及给人或群发消息、回复消息，都应触发此技能。"
 argument-hint: chat list | chat read <name> | chat reply <name> "<msg>"
 allowed-tools: [Bash, Read]
@@ -12,20 +12,20 @@ allowed-tools: [Bash, Read]
 ## 脚本路径
 
 ```
-.claude/skills/wechat-bot/scripts/wechat.py
+.claude/skills/wxbot-skill/scripts/wechat.py
 ```
 
 ## MVP 命令
 
 ### 列出可见聊天
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat list
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat list
 ```
 输出: `[OK] 8 chats: Kent | 工作群 | 妈妈 | ...`
 
 ### 读取聊天上下文
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat read <name>
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat read <name>
 ```
 输出示例:
 ```
@@ -37,7 +37,7 @@ python3 .claude/skills/wechat-bot/scripts/wechat.py chat read <name>
 
 ### 回复聊天
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat reply <name> "<message>"
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat reply <name> "<message>"
 ```
 脚本根据 `config.json` 中的 `auto_send` 设置自动决定是否发送（默认不发送，只输入到输入框）。
 输出: `[OK] Sent to Kent: [AI分身] 好的，几点出发？`
@@ -51,12 +51,12 @@ python3 .claude/skills/wechat-bot/scripts/wechat.py chat reply <name> "<message>
 
 ```bash
 # chat list 较快（~2s），可以前台运行
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat list
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat list
 
 # chat read 和 chat reply：用 run_in_background: true，不需要重定向
 # run_in_background 会自动捕获输出，完成后直接显示结果
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat read Kent
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat reply Kent "内容"
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat read Kent
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat reply Kent "内容"
 ```
 
 ## 标准工作流（回复某人）
@@ -65,7 +65,7 @@ python3 .claude/skills/wechat-bot/scripts/wechat.py chat reply Kent "内容"
 
 ### Step 1: 读取上下文（后台运行，run_in_background: true）
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat read Kent
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat read Kent
 ```
 等待后台任务完成，输出会自动返回。
 
@@ -73,7 +73,7 @@ python3 .claude/skills/wechat-bot/scripts/wechat.py chat read Kent
 
 ### Step 3: 发送回复（后台运行，run_in_background: true）
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat reply Kent "拟写的回复内容"
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat reply Kent "拟写的回复内容"
 ```
 等待后台任务完成，输出会自动返回。脚本会根据 `config.json` 自动决定是直接发送还是只输入到输入框。
 

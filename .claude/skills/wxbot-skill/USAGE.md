@@ -5,7 +5,7 @@
 All commands use the same entry point:
 
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py <module> <command> [args]
+python3 .claude/skills/wxbot-skill/scripts/wechat.py <module> <command> [args]
 ```
 
 ## Commands
@@ -15,7 +15,7 @@ python3 .claude/skills/wechat-bot/scripts/wechat.py <module> <command> [args]
 List all visible chats in the WeChat sidebar.
 
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat list
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat list
 ```
 
 **Output:**
@@ -33,7 +33,7 @@ python3 .claude/skills/wechat-bot/scripts/wechat.py chat list
 Navigate to a chat and read recent messages.
 
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
 ```
 
 **Output:**
@@ -67,7 +67,7 @@ python3 .claude/skills/wechat-bot/scripts/wechat.py chat read "Kent" > /tmp/wech
 Send a reply to a specific chat.
 
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat reply "Kent" "好的，几点出发？" > /tmp/wechat_output.txt 2>&1
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat reply "Kent" "好的，几点出发？" > /tmp/wechat_output.txt 2>&1
 ```
 
 **Output:**
@@ -88,7 +88,7 @@ python3 .claude/skills/wechat-bot/scripts/wechat.py chat reply "Kent" "好的，
 ### Foreground (chat list only)
 
 ```bash
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat list
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat list
 ```
 
 ### Background (chat read / chat reply)
@@ -98,7 +98,7 @@ These commands control the mouse and keyboard. Running them in the foreground wi
 **Pattern:**
 ```bash
 # Step 1: Run in background, redirect output
-python3 .claude/skills/wechat-bot/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
+python3 .claude/skills/wxbot-skill/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
 # (use run_in_background: true in Bash tool)
 
 # Step 2: After completion, read the result

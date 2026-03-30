@@ -69,7 +69,7 @@ Grant these in **System Settings > Privacy & Security**:
 ## Project Structure
 
 ```
-.claude/skills/wechat-bot/
+.claude/skills/wxbot-skill/
 ├── README.md              # This file
 ├── USAGE.md               # Detailed usage guide
 ├── SKILL.md               # Claude Code skill definition
@@ -86,7 +86,7 @@ Grant these in **System Settings > Privacy & Security**:
 All dependencies are self-contained in `scripts/`:
 
 ```
-.claude/skills/wechat-bot/scripts/
+.claude/skills/wxbot-skill/scripts/
 ├── wechat.py              # Main CLI
 ├── local_vision.py        # Vision Framework OCR wrapper
 └── computer_use.py        # pyautogui wrapper
@@ -118,4 +118,4 @@ Edit `config.json` to customize:
 
 ## License
 
-MIT
+Apache-2.0

@@ -1,4 +1,4 @@
-# wechat-bot-skill
+# wxbot-skill-skill
 
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that automates WeChat desktop on macOS through local OCR and keyboard/mouse simulation. All text recognition runs on-device via Apple Vision Framework — no data leaves your machine.
 
@@ -30,8 +30,8 @@ Grant these in **System Settings > Privacy & Security**:
 ### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/nicksiu/wechat-bot-skill.git
-cd wechat-bot-skill
+git clone https://github.com/ScottSiu1983/wxbot-skill.git
+cd wxbot-skill
 pip install -r requirements.txt
 ```
 
@@ -44,7 +44,7 @@ Create `.claude/settings.local.json` (not tracked by git):
   "permissions": {
     "allow": [
       "Bash(python3:*)",
-      "Skill(wechat-bot)"
+      "Skill(wxbot-skill)"
     ]
   }
 }
@@ -52,7 +52,7 @@ Create `.claude/settings.local.json` (not tracked by git):
 
 ### 3. Customize (optional)
 
-Edit `.claude/skills/wechat-bot/config.json`:
+Edit `.claude/skills/wxbot-skill/config.json`:
 
 ```json
 {
@@ -107,4 +107,4 @@ Claude Code  ─→  SKILL.md (trigger + workflow rules)
 
 ## License
 
-MIT
+Apache-2.0
