@@ -83,25 +83,30 @@ Grant these in **System Settings > Privacy & Security**:
         └── *.png          # Step screenshots
 ```
 
-**Sibling dependencies** (in project root):
+All dependencies are self-contained in `scripts/`:
 
 ```
-ComputerUse/
+.claude/skills/wechat-bot/scripts/
+├── wechat.py              # Main CLI
 ├── local_vision.py        # Vision Framework OCR wrapper
-├── computer_use.py        # pyautogui wrapper
-└── CLAUDE.md              # Project-level instructions
+└── computer_use.py        # pyautogui wrapper
 ```
 
 ## Configuration
 
-Key constants in `wechat.py`:
+Edit `config.json` to customize:
 
-```python
-REPLY_PREFIX = "[Scott的AI分身] "  # Auto-prepended to all replies
-SIDEBAR_W   = 60                   # WeChat left icon bar width (px)
-SETTLE      = 0.35                 # UI stabilization delay (s)
-MAX_RETRIES = 3                    # Navigation retry attempts
+```json
+{
+  "auto_send": false,
+  "reply_prefix": "[AI分身] "
+}
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `auto_send` | `false` | `true`: auto-send replies; `false`: type only, user presses Enter |
+| `reply_prefix` | `[AI分身] ` | Prefix auto-prepended to all replies |
 
 ## Limitations
 
@@ -113,4 +118,4 @@ MAX_RETRIES = 3                    # Navigation retry attempts
 
 ## License
 
-Private skill — not for redistribution.
+MIT

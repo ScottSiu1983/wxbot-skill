@@ -1,0 +1,5 @@
+pyautogui>=0.9.54
+pyobjc-framework-Vision>=10.0
+pyobjc-framework-Quartz>=10.0
+numpy>=1.24.0
+Pillow>=10.0.0

@@ -4,6 +4,6 @@ __pycache__/
 .claude/skills/wechat-bot/debug/
 .claude/skills/wechat-bot/.wechat_ui.lock
 .claude/settings.local.json
-config.json
+/config.json
 /tmp/
 *.log

@@ -31,10 +31,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# ── 导入项目根目录的基础模块 ─────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(PROJECT_ROOT))
-
+# ── 导入同目录的基础模块 ─────────────────────────────────────────────────────
 from local_vision import find_text, get_screen_text, take_screenshot, SCREEN_W
 import computer_use as _cu
 
@@ -169,7 +166,7 @@ def scroll(x, y, direction, clicks=3):
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 
-REPLY_PREFIX = "[Scott的AI分身] "
+REPLY_PREFIX_DEFAULT = "[AI分身] "
 
 # WeChat 布局（相对窗口，逻辑像素）
 SIDEBAR_W   = 60    # 左侧图标栏宽度（固定）
@@ -551,30 +548,26 @@ end tell'''
     def _verify_chat_open(self, name: str, rect: tuple, fast_only: bool = False, accurate_only: bool = False) -> bool:
         """
         检查对话是否成功打开。
-        fast_only=True: 仅 fast 模式（用于预检查）。
-        accurate_only=True: 仅 accurate 模式（用于导航后验证，跳过注定失败的 fast）。
-        验证条件：在 WeChat 内容区标题栏找到 name（或其子串）。
+        用单次 OCR 获取标题栏所有文字，再在内存中做子串匹配。
+        验证条件：标题栏文字包含 name 或其前缀子串。
         """
         wx, wy, ww, wh = rect
         cx_min = self._content_x_min(rect)
         cx_max = wx + ww
-        # 只检查标题栏区域（顶部 40px），避免消息体中的文字导致误判
         cy_min = wy
         cy_max = wy + 40
 
-        # 尝试多种搜索关键词：完整名字 → 逐步去掉末尾字符（处理窗口截断）→ 单个词组（去重）
+        # 构建匹配关键词：完整名字 → 逐步缩短前缀 → 单个词组
         keywords = [name]
-        import re as _re
-        # 添加前缀，处理标题栏被截断的情况（如"博客园终..."实际是"博客园终身会员总群"）
         for i in range(len(name) - 1, 2, -1):
             prefix = name[:i]
             if prefix not in keywords:
                 keywords.append(prefix)
-        # 再添加单个词组
-        for p in _re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z0-9]+', name):
-            if p not in keywords:
+        for p in re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z0-9]+', name):
+            if p not in keywords and len(p) >= 2:
                 keywords.append(p)
 
+        # 决定 OCR 模式
         if accurate_only:
             modes = ("accurate",)
         elif fast_only:
@@ -582,22 +575,25 @@ end tell'''
         else:
             modes = ("fast", "accurate")
 
-        for kw in keywords:
-            if len(kw) < 2:
-                continue
-            for mode in modes:
-                items = self._focused_find_text(kw, mode=mode)
-                content_matches = [i for i in items
-                                   if cx_min < i["x"] < cx_max
-                                   and cy_min < i["y"] < cy_max]
-                _dbg(f"Verify '{kw}' [{mode}]: {len(content_matches)} in title bar (x:{cx_min}-{cx_max}, y:{cy_min}-{cy_max})")
-                if content_matches:
-                    for m in content_matches:
-                        _dbg(f"  x={m['x']} y={m['y']} c={m['confidence']:.2f} '{m['text']}'")
-                    return True
-                if mode == "fast":
+        for mode in modes:
+            # 单次全屏 OCR，过滤出标题栏区域的文字
+            all_items = self._focused_screen_text(mode=mode)
+            title_items = [i for i in all_items
+                           if cx_min < i["x"] < cx_max
+                           and cy_min < i["y"] < cy_max]
+            title_text = " ".join(i["text"] for i in title_items)
+            _dbg(f"Verify [{mode}]: title bar text='{title_text}' (x:{cx_min}-{cx_max}, y:{cy_min}-{cy_max})")
+
+            # 在标题栏文字中匹配关键词
+            for kw in keywords:
+                if len(kw) < 2:
                     continue
-                break
+                if kw in title_text:
+                    matched_items = [i for i in title_items if kw in i["text"]]
+                    for m in matched_items:
+                        _dbg(f"  matched '{kw}' in: x={m['x']} y={m['y']} c={m['confidence']:.2f} '{m['text']}'")
+                    return True
+            _dbg(f"Verify [{mode}]: no keyword matched")
         return False
 
     # ── 私有：读取消息 ────────────────────────────────────────────────────────
@@ -1082,17 +1078,20 @@ end tell'''
         _dbg_screenshot("after_type_and_send")
         return True
 
-    def _verify_sent(self, message: str, rect: tuple) -> bool:
+    def _verify_sent(self, message: str, rect: tuple, prefix: str = "") -> bool:
         """
         验证消息是否发送成功。
-        用 accurate 模式搜索回复前缀"分身"，检查内容区和聊天列表预览。
+        用 accurate 模式搜索回复前缀中的关键词，检查内容区和聊天列表预览。
         """
-        _dbg("verify_sent: searching for '分身'")
+        # 从前缀中提取 2+ 字符的中文/英文词作为搜索关键词
+        prefix_keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{2,}', prefix)
+        search_kw = prefix_keywords[0] if prefix_keywords else message[:4]
+        _dbg(f"verify_sent: searching for '{search_kw}' (from prefix='{prefix}')")
         _dbg_screenshot("verify_sent")
         wx, wy, ww, wh = rect
         lx_min = self._chatlist_x_range(rect)[0]
         wx_max = wx + ww
-        all_results = self._focused_find_text("分身", mode="accurate")
+        all_results = self._focused_find_text(search_kw, mode="accurate")
         # 必须在 WeChat 窗口范围内
         wechat_matches = [r for r in all_results
                           if lx_min < r["x"] < wx_max and wy < r["y"] < wy + wh]
@@ -1246,14 +1245,32 @@ end tell'''
 
         return self._summarize(name, messages, is_group=is_group)
 
+    def _load_config(self) -> dict:
+        """读取 skill config.json，返回配置字典。"""
+        config_path = SKILL_DIR / "config.json"
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
     def chat_reply(self, name: str, message: str, no_send: bool = False) -> str:
         """
         向指定聊天发送回复（自动添加 REPLY_PREFIX）。
-        no_send=True 时只输入到输入框，不按回车发送。
+        发送行为由 config.json 的 auto_send 决定：
+          - auto_send: true  → 自动发送
+          - auto_send: false → 只输入到输入框，不按回车（默认）
+        CLI --no-send 参数可强制覆盖为不发送。
         输出: [OK] Sent/Typed to <name>: <full_message>
         """
-        _init_debug("chat_reply", {"name": name, "message": message, "no_send": no_send})
-        full_message = REPLY_PREFIX + message
+        config = self._load_config()
+        auto_send = config.get("auto_send", False)
+        reply_prefix = config.get("reply_prefix", REPLY_PREFIX_DEFAULT)
+        # --no-send CLI 参数优先级最高
+        should_send = False if no_send else auto_send
+
+        _init_debug("chat_reply", {"name": name, "message": message, "no_send": no_send, "auto_send": auto_send, "should_send": should_send})
+        full_message = reply_prefix + message
 
         if not self._navigate_to_chat(name):
             return f'[ERR] 找不到聊天 "{name}"'
@@ -1266,15 +1283,15 @@ end tell'''
         if not self._click_input_box(rect):
             return "[ERR] 无法定位消息输入框"
 
-        if not self._type_and_send(full_message, send=not no_send):
+        if not self._type_and_send(full_message, send=should_send):
             return "[ERR] 输入失败"
 
-        if no_send:
+        if not should_send:
             return f"[OK] Typed to {name} (未发送，请在微信中确认后手动按回车): {full_message}"
 
         # 验证：检查消息是否出现在对话内容区 或 聊天列表预览中
         time.sleep(0.3)
-        if self._verify_sent(message, rect):
+        if self._verify_sent(message, rect, prefix=reply_prefix):
             return f"[OK] Sent to {name}: {full_message}"
         else:
             return f"[ERR] 消息可能未发送成功（未在对话中检测到），请手动检查"
