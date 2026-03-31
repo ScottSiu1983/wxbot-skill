@@ -229,12 +229,16 @@ def _dbg_screenshot(label: str) -> str | None:
 
 
 def _dbg_ocr(label: str, items: list[dict]):
-    """记录 OCR 结果到日志。"""
+    """记录 OCR 结果到日志，包含行高信息。"""
     if not DEBUG:
         return
     _dbg(f"OCR [{label}]: {len(items)} items")
-    for i in sorted(items, key=lambda x: (x["y"], x["x"])):
-        _dbg(f"  x={i['x']:4d} y={i['y']:3d} h={i.get('h',0):2d} c={i['confidence']:.2f} | {i['text']}")
+    sorted_items = sorted(items, key=lambda x: (x["y"], x["x"]))
+    prev_y = None
+    for i in sorted_items:
+        y_gap = f"gap={i['y'] - prev_y}" if prev_y is not None else "gap=--"
+        _dbg(f"  x={i['x']:4d} y={i['y']:3d} h={i.get('h',0):2d} {y_gap:8s} c={i['confidence']:.2f} | {i['text']}")
+        prev_y = i['y']
 
 
 def _dbg_action(action: str, **kwargs):
@@ -798,7 +802,7 @@ end tell'''
         cx_min = self._content_x_min(rect)
         content_x_max = wx + ww
         content_y_min = wy + 40
-        content_y_max = wy + wh - 80
+        content_y_max = wy + wh - 130
 
         screenshot_path = _dbg_screenshot("read_content_area")
         all_items = self._focused_screen_text(mode="accurate")
@@ -911,9 +915,10 @@ end tell'''
           - 宽 15~80px 且高 15~60px → [表情]
           - 更小 → 忽略（可能是 UI 碎片）
 
-        返回: (visual_elements, avatars)
+        返回: (visual_elements, avatars, quote_bubbles)
         - visual_elements: [{"type": "image"|"sticker", "x": int, "y": int, "w": int, "h": int, "sender": str, "desc": str}]
         - avatars: [{"x": int, "y": int, "w": int, "h": int, "center_x": int, "center_y": int}]
+        - quote_bubbles: [{"x": int, "y": int, "w": int, "h": int}]  # 灰色引用气泡
         坐标为逻辑坐标（与 OCR 一致）。
         """
         from PIL import Image
@@ -926,7 +931,7 @@ end tell'''
         cx_min = self._content_x_min(rect)
         content_x_max = wx + ww
         content_y_min = wy + 40
-        content_y_max = wy + wh - 80
+        content_y_max = wy + wh - 130
         midline_x = cx_min + (content_x_max - cx_min) // 2
 
         img = Image.open(screenshot_path)
@@ -983,6 +988,7 @@ end tell'''
         # 简化实现：按行扫描，用 run-length 找连续非零区域，再垂直合并
         visual_elements = []
         avatars = []
+        quote_bubbles = []  # 灰色引用气泡列表
         visited = np.zeros_like(mask, dtype=bool)
 
         def _flood_bbox(sy, sx):
@@ -1050,6 +1056,17 @@ end tell'''
                     region_slice = arr[max(0,by):min(h_px,by+bh), max(0,bx):min(w_px,bx+bw)]
                     if region_slice.size > 0:
                         color_std = np.std(region_slice.reshape(-1, 3).astype(float), axis=0).mean()
+
+                        # 检测灰色引用气泡：
+                        # 特征：颜色标准差 20~45（内有文字但非图片）、宽度较大、高度较小
+                        if 20 <= color_std < 45 and 50 < lw < 600 and 15 < lh < 150:
+                            quote_bubbles.append({
+                                "x": int(lx), "y": int(ly),
+                                "w": int(lw), "h": int(lh)
+                            })
+                            _dbg(f"detect_visual: quote bubble at ({int(lx)},{int(ly)}) {int(lw)}x{int(lh)} color_std={color_std:.1f}")
+                            continue
+
                         _dbg(f"detect_visual: region ({int(lw)}x{int(lh)}) color_std={color_std:.1f}")
                         if color_std < 20:
                             _dbg(f"detect_visual: skipped low-variance region (bubble/bg)")
@@ -1081,8 +1098,8 @@ end tell'''
                     })
                     _dbg(f"detect_visual: {elem_type} at ({int(center_x)},{int(ly+lh/2)}) {int(lw)}x{int(lh)} sender={sender} desc='{desc}'")
 
-        _dbg(f"detect_visual: found {len(visual_elements)} visual elements, {len(avatars)} avatars")
-        return visual_elements, avatars
+        _dbg(f"detect_visual: found {len(visual_elements)} visual elements, {len(avatars)} avatars, {len(quote_bubbles)} quote_bubbles")
+        return visual_elements, avatars, quote_bubbles
 
     def _parse_messages(self, ocr_items: list[dict], rect: tuple, screenshot_path: str = None, is_group: bool = False) -> list[dict]:
         """
@@ -1106,7 +1123,7 @@ end tell'''
         visual_items = []
         avatars = []
         if screenshot_path:
-            visual_items, avatars = self._detect_visual_elements(screenshot_path, ocr_items, rect)
+            visual_items, avatars, _ = self._detect_visual_elements(screenshot_path, ocr_items, rect)
 
         all_items = []
 
@@ -1159,11 +1176,22 @@ end tell'''
 
                 if is_me:
                     sender = "me"
-                    body_texts = [t for _, _, t in msg_texts]
+                    # 合并文字，保留换行（Y差距>15px视为换行）
+                    parts = []
+                    for i, (iy, ix, text) in enumerate(msg_texts):
+                        if i > 0 and iy - msg_texts[i-1][0] > 15:
+                            parts.append("\n")
+                        parts.append(text)
+                    body_texts = ["".join(parts)]
                 else:
                     # 他人：第一行=nickname，其余=发言内容
                     sender = msg_texts[0][2] if msg_texts else "them"
-                    body_texts = [t for _, _, t in msg_texts[1:]]
+                    body_parts = []
+                    for i, (iy, ix, text) in enumerate(msg_texts[1:], start=1):
+                        if i > 1 and iy - msg_texts[i-1][0] > 15:
+                            body_parts.append("\n")
+                        body_parts.append(text)
+                    body_texts = ["".join(body_parts)] if body_parts else []
 
                 # 收集视觉元素（图片/表情）
                 msg_images = []
