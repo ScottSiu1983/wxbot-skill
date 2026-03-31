@@ -486,22 +486,30 @@ if (messages[-1]["sender"] == item["sender"]
 
 ### 8.1 Debug 目录结构
 
+同一轮 Claude 对话的多次 skill 调用共享同一个会话目录，避免每次调用都创建新目录。每轮对话结束后自动清理旧会话。
+
 ```
 .claude/skills/wxbot-skill/debug/
-├── 20260331_143052_chat_read/
-│   ├── log.txt                    # 时序日志
-│   ├── 01_nav_attempt1_before.png # 每步截图
-│   ├── 02_nav_attempt1_after_click.png
-│   ├── 03_nav_attempt1_search_results.png
-│   └── ...
-└── 20260331_143120_chat_reply/
+├── .session                      # 当前会话跟踪文件
+├── .session_{session_id}         # 各会话的元数据文件
+├── 20260331_143052/              # 会话目录（按时间戳命名）
+│   ├── 143052_chat_read/         # 一次 chat read 调用
+│   │   ├── log.txt               # 时序日志
+│   │   ├── 01_nav_attempt1_before.png
+│   │   └── ...
+│   └── 143120_chat_reply/        # 一次 chat reply 调用（同会话）
+│       └── ...
+└── 20260331_150000/              # 下一轮 Claude 对话的会话
     └── ...
 ```
+
+**会话超时**：超过 1 小时无活动视为新会话。
 
 ### 8.2 日志格式
 
 ```
 [14:30:52.123] T=0.00s +0.00s | === WeChat Skill Debug ===
+[14:30:52.123] T=0.00s +0.00s | Session: 20260331_143052
 [14:30:52.123] T=0.00s +0.00s | Command: chat_read
 [14:30:52.123] T=0.00s +0.00s | Args: {"name": "Kent"}
 [14:30:52.456] T=0.33s +0.33s | Window rect: (735, 33, 735, 923)
@@ -510,17 +518,19 @@ if (messages[-1]["sender"] == item["sender"]
 [14:30:53.012] T=0.89s +0.00s |   x= 180 y=150 h=14 c=0.95 | Kent
 ```
 
+- `Session:` : 所属会话 ID
 - `T=` : 从命令开始的总耗时
 - `+` : 距上一条日志的增量耗时
 
 ### 8.3 环境变量
 
 ```bash
-WECHAT_DEBUG=1   # 默认开启
-WECHAT_DEBUG=0   # 关闭调试
+WECHAT_DEBUG=1              # 默认开启
+WECHAT_DEBUG=0              # 关闭调试
+WECHAT_DEBUG_MAX_ROUNDS=5   # 保留最近 N 轮会话（默认10）
 ```
 
-只保留最近 10 次 debug 目录。
+超过 `WECHAT_DEBUG_MAX_ROUNDS` 的旧会话目录会被自动清理。
 
 ---
 

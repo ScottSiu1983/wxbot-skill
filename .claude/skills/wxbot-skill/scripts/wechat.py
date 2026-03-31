@@ -46,41 +46,154 @@ objc.loadBundle("Vision", globals(), bundle_path="/System/Library/Frameworks/Vis
 
 # ── Debug 模块 ───────────────────────────────────────────────────────────────
 # 设置 WECHAT_DEBUG=0 关闭调试，默认开启
+# 设置 WECHAT_DEBUG_MAX_ROUNDS=5 调整保留轮数（默认10）
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 DEBUG_DIR = SKILL_DIR / "debug"
 LOCK_FILE = SKILL_DIR / ".wechat_ui.lock"
+SESSION_FILE = DEBUG_DIR / ".session"  # 当前会话跟踪文件
 DEBUG = os.environ.get("WECHAT_DEBUG", "1") != "0"
+DEBUG_MAX_ROUNDS = int(os.environ.get("WECHAT_DEBUG_MAX_ROUNDS", "10"))
 _debug_log_path = None
 _debug_run_dir = None
 _debug_step = 0
 _debug_start_time = None  # 命令开始时间
 _debug_last_time = None   # 上一条日志时间（用于计算步间耗时）
+_debug_session_id = None  # 当前会话ID
+
+
+def _get_session_id() -> str:
+    """
+    获取或创建当前会话ID。
+    同一轮 Claude 对话的多 次 wechat.py 调用共享同一个会话ID。
+    会话超时：超过 1 小时视为新会话。
+    使用文件锁保护并发访问。
+    """
+    now = time.time()
+    session_timeout = 3600  # 1小时
+
+    # 文件锁路径
+    session_lock = DEBUG_DIR / ".session.lock"
+
+    # 加锁保护并发访问
+    with open(session_lock, "w") as lock_f:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        try:
+            # 尝试读取现有会话
+            if SESSION_FILE.exists():
+                try:
+                    with open(SESSION_FILE) as f:
+                        data = json.load(f)
+                    last_time = data.get("last_time", 0)
+                    if now - last_time < session_timeout:
+                        # 会话有效，更新 last_time 并返回
+                        data["last_time"] = now
+                        data["invocation_count"] = data.get("invocation_count", 0) + 1
+                        with open(SESSION_FILE, "w") as f:
+                            json.dump(data, f)
+                        # 同时更新 session 元数据文件（用于 cleanup）
+                        sid_session_file = DEBUG_DIR / f".session_{data['session_id']}"
+                        with open(sid_session_file, "w") as f:
+                            json.dump(data, f)
+                        return data["session_id"]
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            # 创建新会话
+            new_session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            data = {
+                "session_id": new_session_id,
+                "created_at": now,
+                "last_time": now,
+                "invocation_count": 1,
+            }
+            # 更新当前会话文件和 session 元数据文件
+            with open(SESSION_FILE, "w") as f:
+                json.dump(data, f)
+            sid_session_file = DEBUG_DIR / f".session_{new_session_id}"
+            with open(sid_session_file, "w") as f:
+                json.dump(data, f)
+            return new_session_id
+        finally:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+
+def _cleanup_old_rounds():
+    """清理超过 DEBUG_MAX_ROUNDS 轮的旧会话目录。"""
+    if not DEBUG_DIR.exists():
+        return
+
+    # 读取所有会话目录（格式：{session_id}/{timestamp}_{command}）
+    session_dirs = {}  # session_id -> list of dirs
+
+    for d in DEBUG_DIR.iterdir():
+        if not d.is_dir() or d.name.startswith("."):
+            continue  # 跳过 .session 等隐藏文件和普通文件
+        # 目录名就是 session_id
+        session_id = d.name
+        if session_id not in session_dirs:
+            session_dirs[session_id] = []
+        session_dirs[session_id].append(d)
+
+    if not session_dirs:
+        return
+
+    # 按会话最后活动时间排序（从 session 元数据文件读取 last_time）
+    session_times = {}
+    for sid in session_dirs:
+        # 读取该会话的 session 文件
+        sid_session_file = DEBUG_DIR / f".session_{sid}"
+        if sid_session_file.exists():
+            try:
+                with open(sid_session_file) as f:
+                    data = json.load(f)
+                    # 使用 last_time（最后活动时间）而非 created_at
+                    session_times[sid] = data.get("last_time", 0)
+            except:
+                session_times[sid] = 0
+        else:
+            # 如果没有 session 文件，从目录的 mtime 推断
+            session_times[sid] = min(d.stat().st_mtime for d in session_dirs[sid])
+
+    # 按最后活动时间排序（最新的在前），保留 DEBUG_MAX_ROUNDS 个会话
+    sorted_sessions = sorted(session_times.items(), key=lambda x: x[1], reverse=True)
+
+    # 删除超过限制的旧会话目录
+    for sid, _ in sorted_sessions[DEBUG_MAX_ROUNDS:]:
+        for d in session_dirs[sid]:
+            shutil.rmtree(d, ignore_errors=True)
+        # 删除对应的 session 文件
+        sid_session_file = DEBUG_DIR / f".session_{sid}"
+        if sid_session_file.exists():
+            sid_session_file.unlink(missing_ok=True)
 
 
 def _init_debug(command: str, args: dict):
     """初始化本次运行的 debug 目录和日志文件。"""
-    global _debug_log_path, _debug_run_dir, _debug_step, _debug_start_time, _debug_last_time
+    global _debug_log_path, _debug_run_dir, _debug_step, _debug_start_time, _debug_last_time, _debug_session_id
     if not DEBUG:
         return
+
+    # 获取或创建会话ID（同一 Claude 对话共享）
+    _debug_session_id = _get_session_id()
+
+    # 每次调用在会话目录下创建子目录
     _debug_step = 0
     _debug_start_time = time.time()
     _debug_last_time = _debug_start_time
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _debug_run_dir = DEBUG_DIR / f"{ts}_{command}"
+    ts = datetime.now().strftime("%H%M%S")
+    _debug_run_dir = DEBUG_DIR / _debug_session_id / f"{ts}_{command}"
     _debug_run_dir.mkdir(parents=True, exist_ok=True)
     _debug_log_path = _debug_run_dir / "log.txt"
     _dbg(f"=== WeChat Skill Debug ===")
+    _dbg(f"Session: {_debug_session_id}")
     _dbg(f"Time: {ts}")
     _dbg(f"Command: {command}")
     _dbg(f"Args: {json.dumps(args, ensure_ascii=False)}")
     _dbg(f"Debug dir: {_debug_run_dir}")
-    # 清理旧的 debug 目录（只保留最近 10 次）
-    all_runs = sorted(DEBUG_DIR.iterdir())
-    if len(all_runs) > 10:
-        for old in all_runs[:-10]:
-            if old.is_dir():
-                shutil.rmtree(old, ignore_errors=True)
+
+    # 清理旧的 debug 目录（只保留最近 N 轮会话）
+    _cleanup_old_rounds()
 
 
 def _dbg(msg: str):
@@ -581,66 +694,18 @@ end tell'''
                         break
 
             if best:
-                _dbg(f"Opening search result via keyboard: '{best['text']}' at y={best['y']}")
+                _dbg(f"Opening search result via click: '{best['text']}' at x={best['x']} y={best['y']}")
 
-                # 确定目标所在的 section
-                target_section = candidates[0]["section"] if candidates else None
-
-                # 如果目标不在第一个 section（默认是联系人），需要用 Tab 切换
-                if target_section and target_section != "联系人":
-                    # 计算需要按 Tab 的次数切换到目标 section
-                    # WeChat 搜索面板 tab 顺序: 联系人 -> 群聊 -> 聊天记录 -> 搜索网络结果
-                    tab_order = ["联系人", "群聊", "聊天记录", "搜索网络结果"]
-                    try:
-                        current_tab_idx = tab_order.index("联系人")  # 默认焦点在联系人
-                        target_tab_idx = tab_order.index(target_section)
-                        tab_presses = target_tab_idx - current_tab_idx
-                        if tab_presses > 0:
-                            _dbg(f"Switching to '{target_section}' tab: {tab_presses} Tab presses")
-                            for _ in range(tab_presses):
-                                self._focused_press("tab", activate=False)
-                                time.sleep(0.1)
-                    except ValueError:
-                        pass
-
-                # 目标在当前 section 中的位置：从 section 标题下方开始计数
-                if target_section and target_section in section_ranges:
-                    y_start = section_ranges[target_section][0]
-                    # 收集 section 内的所有候选项（按 y 排序）
-                    section_candidates = []
-                    for i in wechat_text:
-                        if y_start < i["y"] < section_ranges[target_section][1]:
-                            text_clean = i["text"].strip().replace(" ", "").lower()
-                            text_bare = re.sub(r'[\[［].*?[\]］]', '', text_clean).strip()
-                            if name_lower in text_clean or text_clean in name_lower or name_lower in text_bare:
-                                section_candidates.append(i)
-                    section_candidates.sort(key=lambda i: i["y"])
-
-                    # 找到目标在 section 中的索引
-                    target_idx = None
-                    for idx, item in enumerate(section_candidates):
-                        if abs(item["x"] - best["x"]) < 20 and abs(item["y"] - best["y"]) < 10:
-                            target_idx = idx
-                            break
-
-                    if target_idx is not None and target_idx > 0:
-                        moves = min(target_idx, 10)
-                        _dbg(f"Moving down {moves} times in '{target_section}' tab to reach target")
-                        for _ in range(moves):
-                            self._focused_press("down", activate=False)
-                            time.sleep(0.05)
-                        time.sleep(0.1)
-
-                # 按 Enter 打开
-                self._focused_press("enter", activate=False)
+                # 直接点击搜索结果（最可靠的方式，避免键盘导航的不确定性）
+                self._focused_click(best["x"], best["y"])
                 time.sleep(SETTLE)
 
                 # 检测并关闭可能的弹窗
                 self._check_and_close_popup()
 
-                _dbg_screenshot(f"nav_attempt{attempt+1}_after_search_enter")
+                _dbg_screenshot(f"nav_attempt{attempt+1}_after_search_click")
                 verified = self._verify_chat_open(name, rect, accurate_only=True)
-                _dbg(f"Verify after search enter: {verified}")
+                _dbg(f"Verify after search click: {verified}")
                 if verified:
                     # 搜索面板可能还在，按 Escape 关闭后再返回
                     self._focused_press("escape")
@@ -836,7 +901,7 @@ end tell'''
             _dbg(f"classify_image error: {e}")
             return ""
 
-    def _detect_visual_elements(self, screenshot_path: str, ocr_items: list[dict], rect: tuple) -> list[dict]:
+    def _detect_visual_elements(self, screenshot_path: str, ocr_items: list[dict], rect: tuple) -> tuple[list[dict], list[dict]]:
         """
         检测内容区域中的非文字视觉元素（图片、表情包、emoji）。
 
@@ -846,14 +911,16 @@ end tell'''
           - 宽 15~80px 且高 15~60px → [表情]
           - 更小 → 忽略（可能是 UI 碎片）
 
-        返回: [{"type": "image"|"sticker", "x": int, "y": int, "w": int, "h": int, "sender": str, "desc": str}]
+        返回: (visual_elements, avatars)
+        - visual_elements: [{"type": "image"|"sticker", "x": int, "y": int, "w": int, "h": int, "sender": str, "desc": str}]
+        - avatars: [{"x": int, "y": int, "w": int, "h": int, "center_x": int, "center_y": int}]
         坐标为逻辑坐标（与 OCR 一致）。
         """
         from PIL import Image
 
         if not screenshot_path or not Path(screenshot_path).exists():
             _dbg("detect_visual: no screenshot available")
-            return []
+            return [], []
 
         wx, wy, ww, wh = rect
         cx_min = self._content_x_min(rect)
@@ -915,6 +982,7 @@ end tell'''
         # 连通域分析：找非背景像素簇
         # 简化实现：按行扫描，用 run-length 找连续非零区域，再垂直合并
         visual_elements = []
+        avatars = []
         visited = np.zeros_like(mask, dtype=bool)
 
         def _flood_bbox(sy, sx):
@@ -956,12 +1024,25 @@ end tell'''
                     lh = bh / scale
                     center_x = lx + lw / 2
 
-                    # 排除头像：约 30~45px 正方形，紧贴内容区左/右边缘
+                    # 排除头像：约 30~45px 正方形
+                    # 左侧头像：在内容区左侧 250px 范围内（头像+昵称区域）
+                    # 右侧头像：在内容区右侧 80px 范围内（自己的头像紧贴右边框）
+                    is_left_avatar = cx_min <= lx <= cx_min + 250
+                    is_right_avatar = (content_x_max - 80) <= (lx + lw) <= content_x_max
                     is_avatar = (25 < lw < 50 and 25 < lh < 50
                                  and abs(lw - lh) < 10  # 近似正方形
-                                 and (lx < cx_min + 55 or lx + lw > content_x_max - 55))
+                                 and (is_left_avatar or is_right_avatar))
                     if is_avatar:
-                        _dbg(f"detect_visual: skipped avatar at ({int(center_x)},{int(ly+lh/2)}) {int(lw)}x{int(lh)}")
+                        avatars.append({
+                            "x": int(lx),
+                            "y": int(ly),
+                            "w": int(lw),
+                            "h": int(lh),
+                            "center_x": int(center_x),
+                            "center_y": int(ly + lh / 2),
+                            "is_me": is_right_avatar,  # 右侧头像 = 用户的头像
+                        })
+                        _dbg(f"detect_visual: avatar at ({int(center_x)},{int(ly+lh/2)}) {int(lw)}x{int(lh)} is_me={is_right_avatar}")
                         continue
 
                     # 排除消息气泡背景（白色/绿色矩形，覆盖面积大但颜色单一）
@@ -1000,13 +1081,19 @@ end tell'''
                     })
                     _dbg(f"detect_visual: {elem_type} at ({int(center_x)},{int(ly+lh/2)}) {int(lw)}x{int(lh)} sender={sender} desc='{desc}'")
 
-        _dbg(f"detect_visual: found {len(visual_elements)} visual elements")
-        return visual_elements
+        _dbg(f"detect_visual: found {len(visual_elements)} visual elements, {len(avatars)} avatars")
+        return visual_elements, avatars
 
     def _parse_messages(self, ocr_items: list[dict], rect: tuple, screenshot_path: str = None, is_group: bool = False) -> list[dict]:
         """
         将 OCR 条目 + 视觉元素解析为结构化消息列表。
-        is_group=True 时，识别群聊中每条消息的实际发言人昵称。
+
+        设计原则（按用户要求）：
+        1. 头像上边框Y = 消息起始锚点，下一头像上边框Y = 消息结束
+        2. 群聊：紧贴左侧头像的多行文字 → 第一行=nickname，其余=消息内容
+        3. 1:1聊天：content标题即为nickname
+        4. 右侧头像旁的文字 = 我的发言
+
         返回: [{"sender": "me"|"昵称"|"them", "text": str}, ...]
         """
         wx, wy, ww, wh = rect
@@ -1014,81 +1101,104 @@ end tell'''
         content_w = wx + ww - content_x
         midline_x = content_x + content_w // 2
 
-        # 过滤噪音
         items = [i for i in ocr_items if not self._is_noise(i["text"])]
 
-        # 检测视觉元素（图片、表情）
         visual_items = []
+        avatars = []
         if screenshot_path:
-            visual_items = self._detect_visual_elements(screenshot_path, ocr_items, rect)
+            visual_items, avatars = self._detect_visual_elements(screenshot_path, ocr_items, rect)
 
-        # 合并：文字条目 + 视觉元素，统一按 Y 排序
         all_items = []
 
         if is_group:
-            # 群聊模式：基于视觉特征（x 位置 + 字体高度）区分昵称和消息
-            # WeChat 布局：[头像] 昵称(小号灰色) → 气泡[消息(大号深色)]
-            # 昵称紧贴头像右侧，x 偏左；消息在气泡内，x 偏右
-            left_items = sorted([i for i in items if i["x"] < midline_x], key=lambda i: i["y"])
-            right_items = [i for i in items if i["x"] >= midline_x]
+            # ── 群聊 ──────────────────────────────────────────────
+            # content 边界
+            content_x = self._content_x_min(rect)  # content 左边框 X
+            content_x_max = wx + ww                 # content 右边框 X
 
-            # 昵称区域 x 阈值：头像(~35px宽)在 content_x+10 处，昵称紧随其后
-            nickname_x_max = content_x + 140
+            # 合并所有头像并按Y排序（下一个头像不区分左右）
+            all_avatars = sorted(avatars, key=lambda a: a["y"])
 
-            # 收集左侧 h 值，用中位数区分昵称字体（小）和消息字体（大）
-            left_h_values = [i.get("h", 0) for i in left_items]
-            h_available = any(v > 0 for v in left_h_values)
-            if h_available and left_h_values:
-                median_h = sorted(left_h_values)[len(left_h_values) // 2]
-                nickname_h_max = median_h * 0.9
-            else:
-                median_h = 0
-                nickname_h_max = 0
+            _dbg(f"Group: {len(all_avatars)} avatars, content_x={content_x}, content_x_max={content_x_max}")
 
-            # 第一遍：标记昵称行
-            nickname_ys = set()
-            for item in left_items:
-                text = item["text"].strip()
-                h = item.get("h", 0)
-                x = item["x"]
+            # ── 遍历每个头像，划分消息区域 ───────────────────────────────────
+            for i, av in enumerate(all_avatars):
+                av_top = av["y"]
+                av_left = av["x"]
+                av_right = av["x"] + av["w"]
+                is_me = av.get("is_me", False)
 
-                if h_available:
-                    # 主方案：x 位置（靠近头像）+ h 字体高度（小号字体）
-                    is_nickname = (
-                        x < nickname_x_max
-                        and h < nickname_h_max
-                        and len(text) <= 20
-                    )
+                # 消息区域：头像顶部 → 下一头像顶部（不区分左右）
+                if i + 1 < len(all_avatars):
+                    msg_bottom = all_avatars[i + 1]["y"]
                 else:
-                    # h 不可用时回退：x 位置 + 排除含中文句内标点的文本
-                    is_nickname = (
-                        x < nickname_x_max
-                        and len(text) <= 15
-                        and not re.search(r'[，！？；：、]', text)
-                    )
+                    msg_bottom = wy + wh + 200
 
-                if is_nickname:
-                    nickname_ys.add(item["y"])
-                    _dbg(f"Nickname detected: '{text}' at y={item['y']} x={x} h={h}")
+                if is_me:
+                    # 我：头像在右边，消息在头像左边
+                    # X 范围：content 左边框 → 头像左边界
+                    msg_texts = []
+                    for item in items:
+                        ix, iy = item["x"], item["y"]
+                        if content_x <= ix <= av_left and av_top <= iy <= msg_bottom:
+                            msg_texts.append((iy, ix, item["text"].strip()))
+                else:
+                    # 他人：头像在左边，消息在头像右边
+                    # X 范围：头像右边界 → content 右边框
+                    msg_texts = []
+                    for item in items:
+                        ix, iy = item["x"], item["y"]
+                        if av_right <= ix <= content_x_max and av_top <= iy <= msg_bottom:
+                            msg_texts.append((iy, ix, item["text"].strip()))
 
-            # 第二遍：构建左侧消息，关联最近的上方昵称
-            current_nickname = None
-            for item in left_items:
-                if item["y"] in nickname_ys:
-                    current_nickname = item["text"].strip()
+                if not msg_texts:
                     continue
-                sender = current_nickname or "them"
-                all_items.append({"sender": sender, "text": item["text"].strip(), "_y": item["y"], "_type": "text"})
 
-            # 右侧消息 = "me"
-            for item in right_items:
-                all_items.append({"sender": "me", "text": item["text"].strip(), "_y": item["y"], "_type": "text"})
+                # 按Y排序（先出现的行在上）
+                msg_texts.sort(key=lambda x: x[0])
+
+                if is_me:
+                    sender = "me"
+                    body_texts = [t for _, _, t in msg_texts]
+                else:
+                    # 他人：第一行=nickname，其余=发言内容
+                    sender = msg_texts[0][2] if msg_texts else "them"
+                    body_texts = [t for _, _, t in msg_texts[1:]]
+
+                # 收集视觉元素（图片/表情）
+                msg_images = []
+                for ve in visual_items:
+                    if av_top <= ve["y"] <= msg_bottom:
+                        if is_me:
+                            if content_x <= ve["x"] <= av_left:
+                                if ve["type"] == "image":
+                                    desc = ve.get("desc", "")
+                                    msg_images.append(f"[图片:{desc}]" if desc else "[图片]")
+                                else:
+                                    msg_images.append("[表情]")
+                        else:
+                            if av_right <= ve["x"] <= content_x_max:
+                                if ve["type"] == "image":
+                                    desc = ve.get("desc", "")
+                                    msg_images.append(f"[图片:{desc}]" if desc else "[图片]")
+                                else:
+                                    msg_images.append("[表情]")
+
+                combined = " ".join(body_texts)
+                if msg_images:
+                    combined = (combined + " " + " ".join(msg_images)).strip() if combined else " ".join(msg_images)
+
+                if combined:
+                    all_items.append({"sender": sender, "text": combined, "_y": av_top, "_type": "text"})
+                    _dbg(f"Group Msg [{sender}]: '{combined[:60]}' y={av_top}-{msg_bottom}")
         else:
-            # 1:1 模式：原有逻辑
+            # ── 1:1 聊天 ────────────────────────────────────────
+            # 对方消息在左侧，我的消息在右侧
             for item in items:
                 sender = "me" if item["x"] >= midline_x else "them"
                 all_items.append({"sender": sender, "text": item["text"].strip(), "_y": item["y"], "_type": "text"})
 
+        # 添加视觉元素
         for ve in visual_items:
             if ve["type"] == "image":
                 desc = ve.get("desc", "")
@@ -1099,7 +1209,7 @@ end tell'''
 
         all_items.sort(key=lambda i: i["_y"])
 
-        # 合并相邻同 sender 的条目（文字合并，但视觉标签独立保留）
+        # 合并相邻同 sender 条目
         messages = []
         for item in all_items:
             text = item["text"]
@@ -1283,20 +1393,26 @@ end tell'''
     def _scroll_content_area(self, rect: tuple, direction: str = "up", pages: int = 1):
         """在内容区域滚动指定页数，用于加载更多历史消息。
 
-        1 页 = 内容区高度 - 60px，使用 CGEvent 像素级平滑滚动。
+        滚动距离 = 内容区高度 * 0.65（缩小比例，避免漏读）
+        内容区高度 = 窗口高度 - 标题栏(40px) - 输入框区(80px)
+
+        注意：微信有单次滚动上限，逐页滚动比一次滚动多页更可靠。
         """
         wx, wy, ww, wh = rect
         cx_min = self._content_x_min(rect)
         scroll_x = cx_min + (wx + ww - cx_min) // 2
         scroll_y = wy + wh // 2
 
-        # 1 页 = 内容区高度 - 60px（留出边界）
-        content_h = wh - 40 - 80  # 减去标题栏 40px 和输入框区 80px
-        scroll_distance = (content_h - 60) * pages
+        # 内容区高度：窗口高度 - 标题栏 - 输入框区
+        content_h = wh - 40 - 80
+        # 每次滚动一页：内容区的55%，确保有重叠不漏读
+        page_distance = int(content_h * 0.55)
 
-        _cu.smooth_scroll(scroll_x, scroll_y, direction, distance=scroll_distance)
-        time.sleep(0.3)
-        _dbg(f"Scrolled {direction} {pages} page(s) at ({scroll_x}, {scroll_y}), distance={scroll_distance}px")
+        # 逐页滚动，每页后等待足够时间让微信响应
+        for i in range(pages):
+            _dbg(f"Scroll: page {i+1}/{pages}, distance={page_distance}px (content_h={content_h})")
+            _cu.smooth_scroll(scroll_x, scroll_y, direction, distance=page_distance)
+            time.sleep(0.8)  # 每页滚动后等待，让微信有足够时间响应
 
     def chat_read(self, name: str) -> str:
         """
@@ -1316,38 +1432,54 @@ end tell'''
         _dbg(f"Chat type: {'group' if is_group else '1:1'}")
 
         if is_group:
-            # 群聊第一步：先在底部（当前位置）OCR，捕获最新消息
+            # 群聊：滚动-截图-OCR循环，每滚一次都获取信息后合并
+            scroll_pages = 3
+            all_messages = []
+
+            # 第一步：在底部（当前位置）OCR
             _dbg("Group chat: reading bottom (recent messages) first")
             _dbg_screenshot("group_bottom_before_ocr")
-            bottom_ocr, bottom_path = self._read_content_area(rect)
-            bottom_msgs = self._parse_messages(bottom_ocr, rect, bottom_path, is_group=True) if bottom_ocr else []
-            _dbg(f"Group bottom read: {len(bottom_msgs)} messages")
+            ocr_1, path_1 = self._read_content_area(rect)
+            msgs_1 = self._parse_messages(ocr_1, rect, path_1, is_group=True) if ocr_1 else []
+            all_messages.append(msgs_1)
+            _dbg(f"Group read 1/3: {len(msgs_1)} messages")
 
-            # 群聊第二步：向上滚动获取历史上下文
-            scroll_pages = 3
-            _dbg(f"Group chat: scrolling up {scroll_pages} pages for context")
-            self._scroll_content_area(rect, "up", scroll_pages)
-            _dbg_screenshot("after_group_scroll_up")
+            # 第二步：滚动1次后立即截图OCR
+            _dbg("Group chat: scroll 1, then OCR")
+            self._scroll_content_area(rect, "up", 1)
+            _dbg_screenshot("group_after_scroll_1")
+            ocr_2, path_2 = self._read_content_area(rect)
+            msgs_2 = self._parse_messages(ocr_2, rect, path_2, is_group=True) if ocr_2 else []
+            all_messages.append(msgs_2)
+            _dbg(f"Group read 2/3: {len(msgs_2)} messages")
 
-            top_ocr, top_path = self._read_content_area(rect)
-            top_msgs = self._parse_messages(top_ocr, rect, top_path, is_group=True) if top_ocr else []
-            _dbg(f"Group top read: {len(top_msgs)} messages")
+            # 第三步：再滚动1次后立即截图OCR
+            _dbg("Group chat: scroll 2, then OCR")
+            self._scroll_content_area(rect, "up", 1)
+            _dbg_screenshot("group_after_scroll_2")
+            ocr_3, path_3 = self._read_content_area(rect)
+            msgs_3 = self._parse_messages(ocr_3, rect, path_3, is_group=True) if ocr_3 else []
+            all_messages.append(msgs_3)
+            _dbg(f"Group read 3/3: {len(msgs_3)} messages")
 
             # 滚回底部
             self._scroll_content_area(rect, "down", scroll_pages)
             time.sleep(0.2)
 
-            # 合并：历史消息在前 + 最新消息在后，按文本去重
+            # 合并所有消息，按文本去重
+            # 滚动顺序：all_messages[0]=最新(底部), [1]=滚动1次后, [2]=滚动2次后
+            # 输出顺序要求：最早的在前，最新的在后 → 逆序遍历
             seen_texts = set()
             messages = []
-            for msg in top_msgs + bottom_msgs:
-                key = msg.get("text", "").strip()
-                if key and key in seen_texts:
-                    continue
-                if key:
-                    seen_texts.add(key)
-                messages.append(msg)
-            _dbg(f"Group merged: {len(messages)} messages (top:{len(top_msgs)} + bottom:{len(bottom_msgs)} - dedup)")
+            for msgs in reversed(all_messages):
+                for msg in msgs:
+                    key = msg.get("text", "").strip()
+                    if key and key in seen_texts:
+                        continue
+                    if key:
+                        seen_texts.add(key)
+                    messages.append(msg)
+            _dbg(f"Group merged: {len(messages)} messages")
         else:
             # 1:1 聊天
             ocr_items, screenshot_path = self._read_content_area(rect)
