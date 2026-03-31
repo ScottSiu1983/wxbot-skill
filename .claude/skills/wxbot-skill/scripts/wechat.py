@@ -570,7 +570,8 @@ end tell'''
         验证条件：标题栏文字包含 name 或其前缀子串。
         """
         wx, wy, ww, wh = rect
-        cx_min = self._content_x_min(rect)
+        # 标题栏横跨整个窗口，不只是内容区
+        cx_min = wx + SIDEBAR_W  # 从侧栏右边界开始，避免匹配侧栏图标
         cx_max = wx + ww
         cy_min = wy
         cy_max = wy + 40
