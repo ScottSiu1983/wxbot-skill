@@ -262,6 +262,28 @@ end tell
         self._activate_wechat()
         return get_screen_text(mode=mode)
 
+    def _check_and_close_popup(self) -> bool:
+        """
+        检测并关闭意外的弹窗。
+        返回 True 表示检测到并关闭了弹窗。
+        """
+        # 常见弹窗关键词
+        popup_keywords = [
+            "确定", "取消", "关闭", "知道了",
+            "该公众号已迁移", "公众号已迁移",
+            "系统提示", "提示",
+        ]
+
+        items = self._focused_screen_text(mode="fast")
+        for item in items:
+            text = item["text"].strip()
+            if any(kw in text for kw in popup_keywords):
+                _dbg(f"Popup detected: '{text}' at ({item['x']}, {item['y']}), closing")
+                self._focused_press("escape")
+                time.sleep(0.2)
+                return True
+        return False
+
     def _activate_and_get_rect(self) -> tuple:
         """激活 WeChat 并获取窗口位置，合并为单次 AppleScript 调用。"""
         if self._wechat_activated and self._window_rect_cache:
@@ -318,17 +340,42 @@ end tell'''
 
     def _detect_chatlist_width(self, rect: tuple) -> int:
         """
-        动态检测聊天列表面板宽度。
-        直接用窗口宽度比例估算（33%），避免 OCR 调用。
+        通过背景色差异检测聊天列表面板右边界。
+        延迟 ~50-100ms（一次截图 + 扫描）。
         """
         if self._chatlist_w_cache and self._chatlist_rect_cache == rect:
             return self._chatlist_w_cache
 
         wx, wy, ww, wh = rect
-        chatlist_w = int((ww - SIDEBAR_W) * 0.33)
-        chatlist_w = max(180, min(chatlist_w, ww // 2))
-        _dbg(f"Chatlist width: {chatlist_w} (33% of content area)")
 
+        # 截图并检测
+        from PIL import Image
+        screenshot_path = take_screenshot()
+        img = Image.open(screenshot_path)
+
+        # 扫描 y 中线
+        scan_y = wy + wh // 2
+        scan_start = wx + SIDEBAR_W + 180  # 最小宽度后开始
+        scan_end = wx + ww * 2 // 3        # 扫描到 2/3 处
+
+        # 取 chatlist 区域的典型背景色（采样点）
+        bg_color = img.getpixel((wx + SIDEBAR_W + 50, scan_y))[:3]  # RGB
+
+        chatlist_w = None
+        for x in range(scan_start, scan_end):
+            color = img.getpixel((x, scan_y))[:3]
+            diff = sum(abs(c1 - c2) for c1, c2 in zip(color, bg_color))
+            if diff > 30:  # 颜色差异阈值
+                chatlist_w = x - wx - SIDEBAR_W
+                _dbg(f"Chatlist width: detected {chatlist_w}px at x={x} (color diff={diff})")
+                break
+
+        if chatlist_w is None:
+            # fallback: 保守估算
+            chatlist_w = int((ww - SIDEBAR_W) * 0.33)
+            _dbg(f"Chatlist width: fallback {chatlist_w}px (33%)")
+
+        chatlist_w = max(180, min(chatlist_w, ww // 2))
         self._chatlist_w_cache = chatlist_w
         self._chatlist_rect_cache = rect
         return chatlist_w
@@ -426,6 +473,10 @@ end tell'''
                 _dbg(f"Clicking best match: x={best['x']} y={best['y']} '{best['text']}'")
                 self._focused_click(best["x"], best["y"])
                 time.sleep(SETTLE)
+
+                # 检测并关闭可能的弹窗
+                self._check_and_close_popup()
+
                 _dbg_screenshot(f"nav_attempt{attempt+1}_after_click")
                 verified = self._verify_chat_open(name, rect, accurate_only=True)
                 _dbg(f"Verify (1st): {verified}")
@@ -530,10 +581,63 @@ end tell'''
                         break
 
             if best:
-                _dbg(f"Opening search result via keyboard (Enter): '{best['text']}'")
-                # 直接按 Enter 打开第一个搜索结果（避免点击坐标穿透问题）
+                _dbg(f"Opening search result via keyboard: '{best['text']}' at y={best['y']}")
+
+                # 确定目标所在的 section
+                target_section = candidates[0]["section"] if candidates else None
+
+                # 如果目标不在第一个 section（默认是联系人），需要用 Tab 切换
+                if target_section and target_section != "联系人":
+                    # 计算需要按 Tab 的次数切换到目标 section
+                    # WeChat 搜索面板 tab 顺序: 联系人 -> 群聊 -> 聊天记录 -> 搜索网络结果
+                    tab_order = ["联系人", "群聊", "聊天记录", "搜索网络结果"]
+                    try:
+                        current_tab_idx = tab_order.index("联系人")  # 默认焦点在联系人
+                        target_tab_idx = tab_order.index(target_section)
+                        tab_presses = target_tab_idx - current_tab_idx
+                        if tab_presses > 0:
+                            _dbg(f"Switching to '{target_section}' tab: {tab_presses} Tab presses")
+                            for _ in range(tab_presses):
+                                self._focused_press("tab", activate=False)
+                                time.sleep(0.1)
+                    except ValueError:
+                        pass
+
+                # 目标在当前 section 中的位置：从 section 标题下方开始计数
+                if target_section and target_section in section_ranges:
+                    y_start = section_ranges[target_section][0]
+                    # 收集 section 内的所有候选项（按 y 排序）
+                    section_candidates = []
+                    for i in wechat_text:
+                        if y_start < i["y"] < section_ranges[target_section][1]:
+                            text_clean = i["text"].strip().replace(" ", "").lower()
+                            text_bare = re.sub(r'[\[［].*?[\]］]', '', text_clean).strip()
+                            if name_lower in text_clean or text_clean in name_lower or name_lower in text_bare:
+                                section_candidates.append(i)
+                    section_candidates.sort(key=lambda i: i["y"])
+
+                    # 找到目标在 section 中的索引
+                    target_idx = None
+                    for idx, item in enumerate(section_candidates):
+                        if abs(item["x"] - best["x"]) < 20 and abs(item["y"] - best["y"]) < 10:
+                            target_idx = idx
+                            break
+
+                    if target_idx is not None and target_idx > 0:
+                        moves = min(target_idx, 10)
+                        _dbg(f"Moving down {moves} times in '{target_section}' tab to reach target")
+                        for _ in range(moves):
+                            self._focused_press("down", activate=False)
+                            time.sleep(0.05)
+                        time.sleep(0.1)
+
+                # 按 Enter 打开
                 self._focused_press("enter", activate=False)
                 time.sleep(SETTLE)
+
+                # 检测并关闭可能的弹窗
+                self._check_and_close_popup()
+
                 _dbg_screenshot(f"nav_attempt{attempt+1}_after_search_enter")
                 verified = self._verify_chat_open(name, rect, accurate_only=True)
                 _dbg(f"Verify after search enter: {verified}")
@@ -600,19 +704,21 @@ end tell'''
             title_items = [i for i in all_items
                            if cx_min < i["x"] < cx_max
                            and cy_min < i["y"] < cy_max]
-            title_text = " ".join(i["text"] for i in title_items)
-            _dbg(f"Verify [{mode}]: title bar text='{title_text}' (x:{cx_min}-{cx_max}, y:{cy_min}-{cy_max})")
 
-            # 在标题栏文字中匹配关键词
-            for kw in keywords:
-                if len(kw) < 2:
-                    continue
-                if kw in title_text:
-                    matched_items = [i for i in title_items if kw in i["text"]]
-                    for m in matched_items:
-                        _dbg(f"  matched '{kw}' in: x={m['x']} y={m['y']} c={m['confidence']:.2f} '{m['text']}'")
-                    return True
-            _dbg(f"Verify [{mode}]: no keyword matched")
+            # 逐项验证：只有当某个 OCR 项的文字本身就包含关键词（不是组合文字）时才通过
+            # 这样可以避免搜索面板文字和标题栏文字混在一起导致的误判
+            for item in title_items:
+                item_text = item["text"].strip()
+                for kw in keywords:
+                    if len(kw) < 2:
+                        continue
+                    if kw in item_text:
+                        _dbg(f"Verify [{mode}]: matched '{kw}' in item: x={item['x']} y={item['y']} c={item['confidence']:.2f} '{item_text}'")
+                        return True
+
+            all_title_text = " ".join(i["text"] for i in title_items)
+            _dbg(f"Verify [{mode}]: title bar items={len(title_items)}, combined='{all_title_text}' (x:{cx_min}-{cx_max}, y:{cy_min}-{cy_max})")
+            _dbg(f"Verify [{mode}]: no keyword matched in individual items")
         return False
 
     # ── 私有：读取消息 ────────────────────────────────────────────────────────
@@ -1039,14 +1145,12 @@ end tell'''
     def _click_input_box(self, rect: tuple) -> bool:
         """
         定位并点击输入框（使用焦点安全方法）。
-        策略: 在底部区域找"发送"按钮，点击其左侧；或按坐标估算。
+        点击窗口右下角往内缩 25px 的位置。
         """
         wx, wy, ww, wh = rect
-        cx_min = self._content_x_min(rect)
-        content_w = wx + ww - cx_min
-        # 输入框在内容区底部，直接用计算位置（"发送"按钮 OCR 命中率低）
-        input_x = cx_min + content_w // 2
-        input_y = wy + wh - 45
+        # 点击窗口右边界往内缩 25px，底边界往内缩 25px
+        input_x = wx + ww - 25
+        input_y = wy + wh - 25
         _dbg(f"click_input_box: clicking ({input_x}, {input_y})")
         self._focused_click(input_x, input_y)
         time.sleep(0.1)
@@ -1177,15 +1281,22 @@ end tell'''
         return f"[OK] {len(names)} chats: {preview}"
 
     def _scroll_content_area(self, rect: tuple, direction: str = "up", pages: int = 1):
-        """在内容区域滚动指定页数，用于加载更多历史消息。"""
+        """在内容区域滚动指定页数，用于加载更多历史消息。
+
+        1 页 = 内容区高度 - 60px，使用 CGEvent 像素级平滑滚动。
+        """
         wx, wy, ww, wh = rect
         cx_min = self._content_x_min(rect)
         scroll_x = cx_min + (wx + ww - cx_min) // 2
         scroll_y = wy + wh // 2
-        for _ in range(pages):
-            scroll(scroll_x, scroll_y, direction, clicks=5)
-            time.sleep(0.3)
-        _dbg(f"Scrolled {direction} {pages} page(s) at ({scroll_x}, {scroll_y})")
+
+        # 1 页 = 内容区高度 - 60px（留出边界）
+        content_h = wh - 40 - 80  # 减去标题栏 40px 和输入框区 80px
+        scroll_distance = (content_h - 60) * pages
+
+        _cu.smooth_scroll(scroll_x, scroll_y, direction, distance=scroll_distance)
+        time.sleep(0.3)
+        _dbg(f"Scrolled {direction} {pages} page(s) at ({scroll_x}, {scroll_y}), distance={scroll_distance}px")
 
     def chat_read(self, name: str) -> str:
         """
@@ -1238,7 +1349,7 @@ end tell'''
                 messages.append(msg)
             _dbg(f"Group merged: {len(messages)} messages (top:{len(top_msgs)} + bottom:{len(bottom_msgs)} - dedup)")
         else:
-            # 1:1 聊天：原有逻辑
+            # 1:1 聊天
             ocr_items, screenshot_path = self._read_content_area(rect)
             messages = self._parse_messages(ocr_items, rect, screenshot_path) if ocr_items else []
             _dbg(f"Initial read: {len(messages)} messages")
@@ -1252,9 +1363,16 @@ end tell'''
                 ocr_items_more, screenshot_path_more = self._read_content_area(rect)
                 if ocr_items_more:
                     messages_more = self._parse_messages(ocr_items_more, rect, screenshot_path_more)
-                    if len(messages_more) > len(messages):
-                        messages = messages_more
-                        _dbg(f"After scroll: {len(messages)} messages")
+                    # 合并滚动前后的消息，去重
+                    seen_texts = set(msg.get("text", "").strip() for msg in messages if msg.get("text"))
+                    merged = list(messages)
+                    for msg in messages_more:
+                        key = msg.get("text", "").strip()
+                        if key and key not in seen_texts:
+                            seen_texts.add(key)
+                            merged.append(msg)
+                    messages = merged
+                    _dbg(f"After scroll: {len(messages)} messages (merged + deduped)")
 
                 self._scroll_content_area(rect, "down", scroll_pages)
                 time.sleep(0.2)
