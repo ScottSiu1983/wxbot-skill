@@ -530,12 +530,13 @@ end tell'''
                         break
 
             if best:
-                _dbg(f"Clicking search result: x={best['x']} y={best['y']} '{best['text']}'")
-                self._focused_click(best["x"], best["y"])
+                _dbg(f"Opening search result via keyboard (Enter): '{best['text']}'")
+                # 直接按 Enter 打开第一个搜索结果（避免点击坐标穿透问题）
+                self._focused_press("enter", activate=False)
                 time.sleep(SETTLE)
-                _dbg_screenshot(f"nav_attempt{attempt+1}_after_search_click")
+                _dbg_screenshot(f"nav_attempt{attempt+1}_after_search_enter")
                 verified = self._verify_chat_open(name, rect, accurate_only=True)
-                _dbg(f"Verify after search click: {verified}")
+                _dbg(f"Verify after search enter: {verified}")
                 if verified:
                     # 搜索面板可能还在，按 Escape 关闭后再返回
                     self._focused_press("escape")
