@@ -472,7 +472,7 @@ end tell'''
 
         # 扫描 y 中线
         scan_y = wy + wh // 2
-        scan_start = wx + SIDEBAR_W + 180  # 最小宽度后开始
+        scan_start = wx + SIDEBAR_W + 50   # 从侧边栏边界后50px开始（原180太大，错过边界）
         scan_end = wx + ww * 2 // 3        # 扫描到 2/3 处
 
         # 取 chatlist 区域的典型背景色（采样点）
@@ -488,9 +488,9 @@ end tell'''
                 break
 
         if chatlist_w is None:
-            # fallback: 保守估算
-            chatlist_w = int((ww - SIDEBAR_W) * 0.33)
-            _dbg(f"Chatlist width: fallback {chatlist_w}px (33%)")
+            # fallback: 保守估算（原33%太大，改为固定180px）
+            chatlist_w = 180
+            _dbg(f"Chatlist width: fallback {chatlist_w}px")
 
         chatlist_w = max(180, min(chatlist_w, ww // 2))
         self._chatlist_w_cache = chatlist_w
@@ -966,8 +966,8 @@ end tell'''
         # 计算每个像素与背景色的色差（欧氏距离）
         diff = np.sqrt(np.sum((arr.astype(float) - bg_color) ** 2, axis=2))
 
-        # 色差阈值：> 40 认为是非背景内容
-        mask = (diff > 40).astype(np.uint8)
+        # 色差阈值：> 15 认为是非背景内容（降低以检测低对比度头像）
+        mask = (diff > 15).astype(np.uint8)
 
         # 排除 OCR 已识别的文字区域（在 mask 上置零）
         for item in ocr_items:
@@ -1031,9 +1031,9 @@ end tell'''
                     center_x = lx + lw / 2
 
                     # 排除头像：约 30~45px 正方形
-                    # 左侧头像：在内容区左侧 250px 范围内（头像+昵称区域）
+                    # 左侧头像：在内容区左侧 400px 范围内（原250，窗口变窄后扩大）
                     # 右侧头像：在内容区右侧 80px 范围内（自己的头像紧贴右边框）
-                    is_left_avatar = cx_min <= lx <= cx_min + 250
+                    is_left_avatar = cx_min <= lx <= cx_min + 400
                     is_right_avatar = (content_x_max - 80) <= (lx + lw) <= content_x_max
                     is_avatar = (25 < lw < 50 and 25 < lh < 50
                                  and abs(lw - lh) < 10  # 近似正方形
