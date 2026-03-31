@@ -348,14 +348,29 @@ end tell'''
     def _click_search_bar(self, rect: tuple) -> int:
         """
         点击聊天列表顶部的"搜索"栏。
-        直接使用计算位置（搜索栏位置固定），避免 OCR 开销。
+        优先用 OCR 查找"搜索"文字，失败则 fallback 到硬编码位置。
         返回搜索栏的 y 坐标。
         """
         wx, wy, ww, wh = rect
         list_x_min, list_x_max = self._chatlist_x_range(rect)
-        search_x = (list_x_min + list_x_max) // 2
-        search_y = wy + 30
-        _dbg(f"click_search_bar: clicking ({search_x}, {search_y})")
+
+        # 尝试 OCR 查找"搜索"文字（fast 模式约 300ms）
+        search_items = self._focused_find_text("搜索", mode="fast")
+        # 筛选在聊天列表顶部区域内的结果（y 在窗口顶部 60px 内）
+        candidates = [i for i in search_items
+                      if list_x_min < i["x"] < list_x_max
+                      and wy < i["y"] < wy + 60]
+
+        if candidates:
+            best = candidates[0]
+            search_x, search_y = best["x"], best["y"]
+            _dbg(f"click_search_bar: OCR found '搜索' at ({search_x}, {search_y})")
+        else:
+            # Fallback: 硬编码位置
+            search_x = (list_x_min + list_x_max) // 2
+            search_y = wy + 30
+            _dbg(f"click_search_bar: OCR not found, fallback to ({search_x}, {search_y})")
+
         self._focused_click(search_x, search_y)
         time.sleep(0.15)
         return search_y
