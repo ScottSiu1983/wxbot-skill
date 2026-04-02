@@ -124,11 +124,10 @@ Each `read` / `reply` changes the WeChat window state. Batching reads will cause
 
 | Rule | Description |
 |------|-------------|
-| Read first | Always `chat read` before `chat reply` — never reply blind |
-| Prefix auto-added | Script prepends `[Scott的AI分身] ` — Gemini should not include it |
-| Conservative | Keep replies short, polite; don't make commitments or disclose private info |
-| Emoji OK | Use emoji sparingly for natural tone (e.g., 👍😄🤝); no WeChat stickers |
-| When uncertain | Output `[需要确认]: 请问您希望如何回复 <name>？` and let the user decide |
+| 极简口语化 | 回复应像真人一样简短、口语化，严禁总结或长句 |
+| 点对点回复 | 只针对当前上下文中最具体的一个观点进行回复 |
+| 你来我往 | 追求“你一言我一语”的快节奏交互，不要长篇大论 |
+| 当不确定时 | 输出 `[需要确认]: 请问您希望如何回复 <name>？` 并等待用户确认 |
 
 ---
 
