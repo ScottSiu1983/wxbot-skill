@@ -1,9 +1,9 @@
 <p align="center">
   <h1 align="center">wxbot-skill</h1>
   <p align="center">
-    A <a href="Gemini CLI">Gemini CLI</a> skill for WeChat desktop automation
+    Cross-platform WeChat Desktop Automation Skill (Gemini / Claude / Antigravity / OpenClaw)
     <br />
-    Local OCR + keyboard/mouse simulation · Your data never leaves your machine
+    Pixel-level Layout Analysis · Human-like Interaction · Privacy-focused Local Data
   </p>
   <p align="center">
     <a href="https://github.com/ScottSiu1983/wxbot-skill/releases"><img src="https://img.shields.io/github/v/release/ScottSiu1983/wxbot-skill?include_prereleases&style=flat-square" alt="Release" /></a>
@@ -17,112 +17,68 @@
 
 ---
 
-## Features
+## v0.2-beta New Features
 
-- **Chat List** — List all visible WeChat conversations
-- **Chat Read** — Navigate to any chat and extract message history with sender attribution
-- **Chat Reply** — Send contextual replies with automatic prefix tagging
-- **Group Chat Support** — Detects groups, identifies per-message senders by visual layout
-- **Visual Detection** — Classifies images, stickers, and emoji in conversations
-- **Haiku-Friendly** — Optimized SKILL.md instructions for cost-efficient operation with Gemini
+- **Structural Layout Detection** — Dynamically detects WeChat window boundaries, precisely identifying sidebars, message flows, and input fields.
+- **Human-like Interaction** — Uses Quartz-level events for character typing and rhythmic "Burst Typing" to simulate natural human input pace.
+- **Enhanced Group Support** — Automatic parsing of quotes, avatar-based sender identification, and multi-modal message (image/sticker) classification.
+- **Navigation 2.0** — Restored section-header based search (Contacts/Groups) for precise target selection among duplicate names.
+- **One-click Adaptation** — Standardized adapter system for one-click installation into Gemini, Claude, Antigravity, OpenClaw, and more.
+
+## Supported Platforms
+
+| Platform | Setup Command | Recommended Model |
+|----------|---------------|-------------------|
+| **Gemini CLI** | `./install.sh --platform gemini` | Gemini 1.5 Pro/Flash |
+| **Claude Code** | `./install.sh --platform claude` | Claude 3.5 Sonnet |
+| **Antigravity** | `./install.sh --platform antigravity` | Any SOTA LLM |
+| **OpenClaw** | `./install.sh --platform openclaw` | GPT-4o / Claude 3.5 |
+| **Codex CLI** | `./install.sh --platform codex` | - |
+| **Cursor** | `./install.sh --platform cursor` | - |
 
 ## Requirements
 
-| Dependency | Version |
-|------------|---------|
-| macOS | 13+ (Vision Framework, AppleScript) |
-| Python | 3.10+ |
-| WeChat | Mac desktop app |
-| Gemini CLI | [CLI](Gemini CLI) |
+- **macOS** 13+ (Vision Framework, AppleScript)
+- **Python** 3.10+
+- **WeChat** Mac desktop app
 
 ### macOS Permissions
 
 Grant these in **System Settings → Privacy & Security**:
-
-- **Accessibility** — Terminal / IDE (for pyautogui keyboard/mouse control)
-- **Screen Recording** — Terminal / IDE (for screencapture)
+- **Accessibility** — Your Terminal / IDE (for key/mouse control)
+- **Screen Recording** — Your Terminal / IDE (for OCR screenshots)
 
 ## Quick Start
 
-### 1. Clone and install dependencies
+1. **Clone and Install**
+   ```bash
+   git clone https://github.com/ScottSiu1983/wxbot-skill.git
+   cd wxbot-skill
+   pip install -r requirements.txt
+   ```
 
-```bash
-git clone https://github.com/ScottSiu1983/wxbot-skill.git
-cd wxbot-skill
-pip install -r requirements.txt
-```
+2. **One-click Installation**
+   ```bash
+   ./install.sh  # Interactive mode
+   ```
 
-### 2. Configure permissions
+3. **Run**
+   Tell your AI Agent:
+   - "List my WeChat chats"
+   - "Read messages from Project Team and suggest a reply"
 
-Create `.claude/settings.local.json` (not tracked by git):
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3:*)",
-      "Skill(wxbot-skill)"
-    ]
-  }
-}
-```
-
-### 3. Customize (optional)
-
-Edit `skills/wxbot-skill/config.json`:
-
-```json
-{
-  "auto_send": false,
-  "reply_prefix": "[AI分身] "
-}
-```
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `auto_send` | `false` | `true`: auto-send replies; `false`: type into input box only |
-| `reply_prefix` | `[AI分身] ` | Prefix auto-prepended to all replies |
-
-### 4. Run
-
-```bash
-claude  # or: claude --model haiku
-```
-
-Then say:
+## Project Structure
 
 ```
-列出微信聊天        # list chats
-回复 Kent           # read context and compose a reply
-给工作群回复 收到    # reply to a group with specific content
+wxbot-skill/
+├── skills/wxbot-skill/       ← Core skill directory
+│   ├── SKILL.md              ← Platform-agnostic skill definition
+│   ├── scripts/              ← Implementation scripts (wechat.py, etc.)
+│   └── config.json           ← Automation settings
+├── adapters/                 ← Cross-platform adapter generator
+├── install.sh                ← Integrated installation tool
+└── RELEASE_NOTES.md          ← [NEW] Detailed v0.2-beta logs
 ```
-
-## How It Works
-
-```
-Gemini CLI  ─→  SKILL.md (trigger + workflow rules)
-                    │
-                    ▼
-               wechat.py CLI
-          chat list | read | reply
-                    │
-          ┌─────────┴──────────┐
-          ▼                    ▼
-   local_vision.py      computer_use.py
-   (Vision OCR)         (pyautogui)
-          │                    │
-          └─────────┬──────────┘
-                    ▼
-    macOS: Vision · Quartz · AppleScript
-```
-
-## Limitations
-
-- **macOS only** — depends on Vision Framework and AppleScript
-- **Single instance** — one WeChat operation at a time (file lock enforced)
-- **Text-only replies** — no images, stickers, or files
-- **OCR dependent** — accuracy varies with font size and window layout
-- **No WeChat API** — purely visual automation
 
 ## License
 

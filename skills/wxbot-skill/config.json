@@ -1,4 +1,5 @@
 {
   "auto_send": false,
-  "reply_prefix": "[AI分身] "
+  "reply_prefix": "",
+  "reply_suffix": " [AI分身]"
 }

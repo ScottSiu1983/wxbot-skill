@@ -567,7 +567,8 @@ end tell'''
         final_auto_send = auto_send if auto_send is not None else cfg.get("auto_send", False)
             
         prefix = cfg.get("reply_prefix", REPLY_PREFIX_DEFAULT)
-        full = prefix + message
+        suffix = cfg.get("reply_suffix", "")
+        full = prefix + message + suffix
         self._activate_wechat()
         _cu.type_text(full)
         if final_auto_send: 

@@ -1,194 +1,122 @@
-# Usage Guide
+# WeChat 自动化技能 - 使用指南 (v0.2-beta)
 
-## Quick Start
+本指南介绍如何安装、配置并使用 `wxbot-skill` 进行微信自动化处理。目前已支持 **Gemini, Claude, Antigravity, OpenClaw, Codex, Cursor** 等主流 AI Agent 平台。
 
-All commands use the same entry point:
+---
 
+## 1. 环境准备
+
+- **操作系统**: macOS 13 (Ventura) 及以上版本
+- **Python 环境**: Python 3.10+
+- **关键依赖**:
+  ```bash
+  pip install -r requirements.txt
+  ```
+- **权限授予**:
+  在 **系统设置 → 隐私与安全性** 中为你的终端或 IDE 授予：
+  - **辅助功能** (Quartz 底层注入模拟按键)
+  - **屏幕录制** (Vision OCR 获取窗口文本)
+
+---
+
+## 2. 安装与适配 (跨平台)
+
+项目内置了 `install.sh` 脚本，可以自动检测并安装技能到不同的 AI Agent 运行目录。
+
+### 交互式安装
 ```bash
-python3 skills/wxbot-skill/scripts/wechat.py <module> <command> [args]
+./install.sh
 ```
 
-## Commands
-
-### `chat list`
-
-List all visible chats in the WeChat sidebar.
-
+### 指定平台安装
 ```bash
-python3 skills/wxbot-skill/scripts/wechat.py chat list
+# 安装到 Gemini CLI
+./install.sh --platform gemini
+
+# 安装到 Claude Code
+./install.sh --platform claude
+
+# 安装到 Antigravity
+./install.sh --platform antigravity
 ```
 
-**Output:**
+### 目录结构 (安装后)
+安装后，核心脚本通过符号链接共享，确保逻辑统一：
 ```
-[OK] 8 chats: Kent | 工作群 | 妈妈 | CDF-AI | 萧Scott | 数据库先进工作者 | ThinkInAI | 情怀新群
-```
-
-- Runtime: ~2s
-- Can run in foreground
-
----
-
-### `chat read <name>`
-
-Navigate to a chat and read recent messages.
-
-```bash
-python3 skills/wxbot-skill/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
-```
-
-**Output:**
-```
-[OK] Kent (5 msgs):
-  them: 宵夜在此
-  me: 这个不错啊！卜卜蚬好吃的...
-  them: 晚上一起去？
-  me: [Scott的AI分身] 好的，几点出发？
-  them: 8点老地方见
-```
-
-- Runtime: ~5–15s (depends on navigation + group scroll)
-- **Must run in background** (`run_in_background: true`)
-- Redirect stdout to file, then read with `Read` tool
-
-**Group chat behavior:**
-1. First OCR at current position (captures latest messages)
-2. Scroll up 3 pages, second OCR (captures older context)
-3. Merge + deduplicate → chronological order
-4. Sender attribution via nickname detection (font size + position near avatar)
-
-**1:1 chat behavior:**
-1. Single OCR at current position
-2. If < 5 messages, auto-scrolls up for more context
-
----
-
-### `chat reply <name> "<message>"`
-
-Send a reply to a specific chat.
-
-```bash
-python3 skills/wxbot-skill/scripts/wechat.py chat reply "Kent" "好的，几点出发？" > /tmp/wechat_output.txt 2>&1
-```
-
-**Output:**
-```
-[OK] Sent to Kent: [Scott的AI分身] 好的，几点出发？
-```
-
-- Runtime: ~5–10s
-- **Must run in background** (`run_in_background: true`)
-- The prefix `[Scott的AI分身] ` is added automatically — do not include it in the message
-- Supports emoji: `"好的 👍"` ✓
-- Does not support images, WeChat stickers, or file attachments
-
----
-
-## Execution Modes
-
-### Foreground (chat list only)
-
-```bash
-python3 skills/wxbot-skill/scripts/wechat.py chat list
-```
-
-### Background (chat read / chat reply)
-
-These commands control the mouse and keyboard. Running them in the foreground will interfere with the Gemini CLI terminal.
-
-**Pattern:**
-```bash
-# Step 1: Run in background, redirect output
-python3 skills/wxbot-skill/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
-# (use run_in_background: true in Bash tool)
-
-# Step 2: After completion, read the result
-Read /tmp/wechat_output.txt
+{AGENT_DIR}/skills/wxbot-skill/
+├── SKILL.md         # 技能入口定义
+├── config.json      # 核心配置
+└── scripts/         # 核心脚本链接
 ```
 
 ---
 
-## Multi-Chat Workflow
+## 3. 核心配置
 
-When processing multiple chats, always complete one before starting the next:
+编辑 `skills/wxbot-skill/config.json`：
 
-```
-✅ Correct: read A → reply A → read B → reply B
-❌ Wrong:   read A → read B → reply A → reply B
-```
-
-Each `read` / `reply` changes the WeChat window state. Batching reads will cause context to be lost when replying.
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `auto_send` | `false` | `true`：自动发送回复；`false` (推荐)：仅键入，手动按回车发送 |
+| `reply_prefix` | `[AI分身] ` | 自动添加到所有 AI 生成回复前的前缀 |
 
 ---
 
-## Reply Guidelines
+## 4. 常用指令建议
 
-| Rule | Description |
-|------|-------------|
-| 极简口语化 | 回复应像真人一样简短、口语化，严禁总结或长句 |
-| 点对点回复 | 只针对当前上下文中最具体的一个观点进行回复 |
-| 你来我往 | 追求“你一言我一语”的快节奏交互，不要长篇大论 |
-| 当不确定时 | 输出 `[需要确认]: 请问您希望如何回复 <name>？` 并等待用户确认 |
+在 Agent 聊天框中尝试以下表达：
 
----
-
-## Error Handling
-
-All errors follow the format `[ERR] description`.
-
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `找不到聊天 "xxx"` | Name mismatch or WeChat not in foreground | Check spelling; ensure WeChat is open |
-| `无法激活 WeChat` | WeChat not running | Open WeChat manually |
-| `获取窗口位置失败` | Window minimized or off-screen | Restore the WeChat window |
-| `消息可能未发送成功` | Verification failed after sending | Check WeChat manually |
-| `PyAutoGUI fail-safe` | Mouse hit screen corner | Normal safety trigger; retry the command |
+- **列出聊天**: "列出微信可见聊天"、"现在谁在找我？"
+- **读取上下文**: "看下 东方电子 说了什么"、"读一下最近的聊天记录"
+- **智能回复**: "给 Kent 回一个 好的，晚点到"、"针对群里的讨论给一个合理的回复"
 
 ---
 
-## Debugging
+## 5. v0.2-beta 特色功能说明
 
-Each run creates a timestamped directory under `debug/`:
+### 5.1 像素级结构化探测
+系统不再依赖硬编码坐标。通过 `_detect_absolute_layout()` 动态探测分界线，即使你手动调整了微信聊天列表的宽度，系统也能精准定位。
 
-```
-debug/20260329_223534_chat_read/
-├── log.txt                          # Full execution timeline
-├── 01_nav_attempt1_before.png       # Before navigation
-├── 02_nav_attempt1_search_results.png
-├── 03_nav_attempt1_after_search_click.png
-├── 04_group_bottom_before_ocr.png   # Bottom OCR (recent msgs)
-├── 05_read_content_area.png         # Content area screenshot
-├── 06_after_group_scroll_up.png     # After scrolling up
-└── 07_read_content_area.png         # Top OCR (older context)
-```
+### 5.2 拟人化打字 (Burst Typing)
+由于使用了 Quartz 底层驱动，键入过程不再是死板的等距输入，而是带有“节奏感”的词组分块输入，极大降低了被微信社交风控拦截的风险。
 
-**Log format:**
-```
-[HH:MM:SS.ms] T=total_s +delta_s | message
-```
-
-Only the 10 most recent runs are kept; older directories are auto-cleaned.
+### 5.3 深度群聊解析
+支持自动解析 **引用消息 (Quote)**，并能通过 **头像锚点** 精准判定群内对话的每一个发言者，而不仅仅是左右对齐。
 
 ---
 
-## Supported Chat Name Formats
+## 6. 常见问题 (FAQ)
 
-| Format | Example | Notes |
-|--------|---------|-------|
-| Chinese name | `"萧Scott"` | Mixed scripts OK |
-| English name | `"Kent"` | Case-insensitive matching |
-| Group name | `"CDF-AI"` | Partial match supported |
-| Long group name | `"博客园终身会员总群"` | Prefix matching handles window truncation |
-| Name with brackets | `"[净]数据库先进工作者"` | Brackets auto-stripped during matching |
+- **Q: 为什么提示 [ERR] 另一个实例正在操作？**
+  - A: 系统内置了进程锁，防止多个操作冲突。请等待前一个动作完成。
+- **Q: 搜索找不到人怎么办？**
+  - A: 确保微信在前台可见。v0.2-beta 恢复了“联系人/群聊”分区搜索逻辑，准确率显著提升。
+- **Q: 是否支持 Windows？**
+  - A: 暂不支持。目前深度依赖 macOS 原生 Vision OCR 框架和 AppleScript。
 
 ---
 
-## Placeholder Commands (Not Yet Implemented)
+## 7. 支持的聊天名格式
 
-```bash
-python3 wechat.py moments comment <content>    # Moments comment
-python3 wechat.py contacts tag <name> <tag>    # Add contact tag
-python3 wechat.py contacts approve             # Accept friend request
-python3 wechat.py contacts add <phone_or_id>   # Add contact
-```
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| 中文名 | `"萧Scott"` | 支持中英文混合 |
+| 英文名 | `"Kent"` | 大小写不敏感匹配 |
+| 群组名 | `"CDF-AI"` | 支持部分匹配 |
+| 长群名 | `"博客园终身会员总群"` | 窗口截断时自动前缀匹配 |
+| 带括号的群名 | `"[净]数据库先进工作者"` | 括号和前缀在匹配时自动过滤 |
 
-These commands are defined but return `[ERR] ... 尚未实现`.
+---
+
+## 8. 错误处理
+
+所有错误统一格式：`[ERR] 描述`
+
+| 错误信息 | 原因 | 解决方法 |
+|----------|------|----------|
+| `找不到聊天 "xxx"` | 名称不匹配或 WeChat 未在前台 | 检查名称拼写；确保微信可见 |
+| `无法激活 WeChat` | WeChat 未运行 | 手动打开 WeChat |
+| `获取窗口位置失败` | 窗口最小化或不在屏幕内 | 恢复 WeChat 窗口 |
+| `另一个 wechat.py 实例正在操作中` | 进程锁冲突 | 等待其他实例完成 |
+| `PyAutoGUI fail-safe` | 鼠标触及屏幕角落 | 正常安全机制，重试命令即可 |
+

@@ -1,121 +1,34 @@
-# WeChat Desktop Automation Skill
+# WeChat 自动化技能 (v0.2-beta)
 
-A Gemini CLI skill that automates WeChat desktop (macOS) through local OCR and keyboard/mouse simulation. All text recognition runs on-device via Apple Vision Framework — no data leaves your machine.
+通过本地 OCR + Quartz HID 事件控制 WeChat 桌面应用。
 
-## Features
+## 核心特性
 
-- **Chat List** — List all visible conversations in the sidebar
-- **Chat Read** — Navigate to any chat and extract message history with sender attribution
-- **Chat Reply** — Send contextual replies with automatic prefix tagging
-- **Group Chat Support** — Detects group chats, identifies per-message senders by visual layout, and extracts quoted messages (reply quotes)
-- **Visual Detection** — Classifies images, stickers, and emoji in conversations
-- **Debug Logging** — Timestamped logs + screenshots for every operation
+- **结构化探测** — 动态定位窗口布局，支持 Retina 适配。
+- **跨平台适配** — 支持 Gemini, Claude, Antigravity, OpenClaw 等。
+- **解析增强** — 群聊引用过滤，头像锚点发送者识别。
+- **仿真输入** — 基于 Quartz 系统的 Burst Typing 拟人化打字。
 
-## Requirements
-
-| Dependency | Purpose |
-|-----------|---------|
-| macOS 13+ | Vision Framework OCR, AppleScript |
-| Python 3.10+ | Runtime |
-| WeChat for Mac | Target application |
-| pyautogui | Mouse / keyboard control |
-| pyobjc | macOS framework bindings (Vision, Quartz) |
-| numpy | Image array operations |
-| Pillow | Image cropping for region OCR |
-
-### macOS Permissions
-
-Grant these in **System Settings > Privacy & Security**:
-
-- **Accessibility** — Terminal / IDE (for pyautogui)
-- **Screen Recording** — Terminal / IDE (for screencapture)
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│                   Gemini CLI                        │
-│              (interprets user intent)                │
-├─────────────────────────────────────────────────────┤
-│                  SKILL.md                            │
-│         (trigger rules, reply guidelines)            │
-├─────────────────────────────────────────────────────┤
-│               wechat.py CLI                          │
-│        chat list | chat read | chat reply            │
-├──────────┬──────────────┬───────────────────────────┤
-│ local_vision.py         │  computer_use.py           │
-│ (Vision OCR)            │  (pyautogui wrapper)       │
-├──────────┴──────────────┴───────────────────────────┤
-│  macOS: Vision · Quartz · AppleScript · screencapture│
-└─────────────────────────────────────────────────────┘
-```
-
-### Processing Pipelines
-
-**Read Pipeline:**
-1. Activate WeChat via AppleScript
-2. Verify target chat is open (title bar OCR) or navigate via search
-3. Screenshot content area → Vision OCR → structured messages
-4. For groups: dual-pass OCR (bottom + scroll-up) with dedup
-5. Detect visual elements (images/emoji) via pixel classification
-6. Return formatted summary with sender labels
-
-**Reply Pipeline:**
-1. Navigate to target chat (reuses read pipeline's navigation)
-2. Locate input box via "Send" button position
-3. Type message character-by-character via CGEvent Unicode injection
-4. Press Enter → verify message appears in conversation
-
-## Project Structure
+## 目录结构
 
 ```
 skills/wxbot-skill/
-├── README.md              # This file
-├── USAGE.md               # Detailed usage guide
-├── SKILL.md               # Gemini CLI skill definition
-├── scripts/
-│   └── wechat.py          # Main CLI (1377 lines)
-├── references/
-│   └── wechat-layout.md   # WeChat UI layout reference
-└── debug/                 # Auto-generated (last 10 runs)
-    └── {timestamp}_{cmd}/
-        ├── log.txt        # Execution timeline
-        └── *.png          # Step screenshots
+├── SKILL.md         # 技能入口定义 (AI Agent 逻辑规则)
+├── USAGE.md         # 详细使用指南
+├── config.json      # 核心配置 (auto_send, prefix)
+├── scripts/         # 核心命令执行脚本
+│   ├── wechat.py    # 统一 CLI
+│   ├── local_vision.py # OCR 与图像分析
+│   └── computer_use.py # Quartz 仿真交互
+└── references/      # 布局参考与文档
 ```
 
-All dependencies are self-contained in `scripts/`:
+## 快速运行
 
-```
-skills/wxbot-skill/scripts/
-├── wechat.py              # Main CLI
-├── local_vision.py        # Vision Framework OCR wrapper
-└── computer_use.py        # pyautogui wrapper
-```
+1. 克隆本项目。
+2. 运行 `./install.sh` 进行适配安装。
+3. 在你的 AI Agent 中触发动作。
 
-## Configuration
+## 调试说明
 
-Edit `config.json` to customize:
-
-```json
-{
-  "auto_send": false,
-  "reply_prefix": "[AI分身] "
-}
-```
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `auto_send` | `false` | `true`: auto-send replies; `false`: type only, user presses Enter |
-| `reply_prefix` | `[AI分身] ` | Prefix auto-prepended to all replies |
-
-## Limitations
-
-- **macOS only** — depends on Vision Framework and AppleScript
-- **Single instance** — one WeChat operation at a time (sequential processing)
-- **OCR accuracy** — fast mode (~0.3s) trades accuracy for speed; accurate mode (~1s) is slower but reliable for Chinese text
-- **Window size dependent** — long group names may be truncated in narrow windows
-- **No API access** — purely visual automation; no WeChat internal API
-
-## License
-
-Apache-2.0
+调试日志与分步截图存放在 `debug/` 目录下，仅保留最近 10 次运行记录。
