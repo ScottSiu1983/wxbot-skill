@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
 """
 wechat.py — 统一 WeChat 自动化 CLI
-
-用法:
-  python3 wechat.py chat list
-  python3 wechat.py chat read <name>
-  python3 wechat.py chat reply <name> "<message>"
-
-输出规范（给 Claude 看的极简文本）:
-  成功: [OK] ...
-  失败: [ERR] ...
-
-所有截图/OCR/导航在本脚本内部完成，不暴露中间状态给 Claude。
 """
-
-__version__ = "0.1-beta"
 
 import argparse
 import contextlib
@@ -33,7 +20,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# ── 导入同目录的基础模块 ─────────────────────────────────────────────────────
 from local_vision import find_text, get_screen_text, take_screenshot, SCREEN_W
 import computer_use as _cu
 
@@ -44,280 +30,92 @@ from Quartz import (CGImageSourceCreateWithURL, CGImageSourceCreateImageAtIndex,
                      CGEventPost, kCGHIDEventTap)
 objc.loadBundle("Vision", globals(), bundle_path="/System/Library/Frameworks/Vision.framework")
 
-# ── Debug 模块 ───────────────────────────────────────────────────────────────
-# 设置 WECHAT_DEBUG=0 关闭调试，默认开启
-# 设置 WECHAT_DEBUG_MAX_ROUNDS=5 调整保留轮数（默认10）
-
 SKILL_DIR = Path(__file__).resolve().parents[1]
 DEBUG_DIR = SKILL_DIR / "debug"
 LOCK_FILE = SKILL_DIR / ".wechat_ui.lock"
-SESSION_FILE = DEBUG_DIR / ".session"  # 当前会话跟踪文件
+SESSION_FILE = DEBUG_DIR / ".session"
 DEBUG = os.environ.get("WECHAT_DEBUG", "1") != "0"
-DEBUG_MAX_ROUNDS = int(os.environ.get("WECHAT_DEBUG_MAX_ROUNDS", "10"))
-_debug_log_path = None
-_debug_run_dir = None
-_debug_step = 0
-_debug_start_time = None  # 命令开始时间
-_debug_last_time = None   # 上一条日志时间（用于计算步间耗时）
-_debug_session_id = None  # 当前会话ID
-
+DEBUG_MAX_ROUNDS = 10
 
 def _get_session_id() -> str:
-    """
-    获取或创建当前会话ID。
-    同一轮 Claude 对话的多 次 wechat.py 调用共享同一个会话ID。
-    会话超时：超过 1 小时视为新会话。
-    使用文件锁保护并发访问。
-    """
     now = time.time()
-    session_timeout = 3600  # 1小时
-
-    # 文件锁路径
+    session_timeout = 3600
     session_lock = DEBUG_DIR / ".session.lock"
-
-    # 加锁保护并发访问
     with open(session_lock, "w") as lock_f:
         fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
         try:
-            # 尝试读取现有会话
             if SESSION_FILE.exists():
                 try:
-                    with open(SESSION_FILE) as f:
-                        data = json.load(f)
-                    last_time = data.get("last_time", 0)
-                    if now - last_time < session_timeout:
-                        # 会话有效，更新 last_time 并返回
+                    with open(SESSION_FILE) as f: data = json.load(f)
+                    if now - data.get("last_time", 0) < session_timeout:
                         data["last_time"] = now
                         data["invocation_count"] = data.get("invocation_count", 0) + 1
-                        with open(SESSION_FILE, "w") as f:
-                            json.dump(data, f)
-                        # 同时更新 session 元数据文件（用于 cleanup）
-                        sid_session_file = DEBUG_DIR / f".session_{data['session_id']}"
-                        with open(sid_session_file, "w") as f:
-                            json.dump(data, f)
+                        with open(SESSION_FILE, "w") as f: json.dump(data, f)
                         return data["session_id"]
-                except (json.JSONDecodeError, IOError):
-                    pass
-
-            # 创建新会话
-            new_session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            data = {
-                "session_id": new_session_id,
-                "created_at": now,
-                "last_time": now,
-                "invocation_count": 1,
-            }
-            # 更新当前会话文件和 session 元数据文件
-            with open(SESSION_FILE, "w") as f:
-                json.dump(data, f)
-            sid_session_file = DEBUG_DIR / f".session_{new_session_id}"
-            with open(sid_session_file, "w") as f:
-                json.dump(data, f)
-            return new_session_id
-        finally:
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
-
-
-def _cleanup_old_rounds():
-    """清理超过 DEBUG_MAX_ROUNDS 轮的旧会话目录。"""
-    if not DEBUG_DIR.exists():
-        return
-
-    # 读取所有会话目录（格式：{session_id}/{timestamp}_{command}）
-    session_dirs = {}  # session_id -> list of dirs
-
-    for d in DEBUG_DIR.iterdir():
-        if not d.is_dir() or d.name.startswith("."):
-            continue  # 跳过 .session 等隐藏文件和普通文件
-        # 目录名就是 session_id
-        session_id = d.name
-        if session_id not in session_dirs:
-            session_dirs[session_id] = []
-        session_dirs[session_id].append(d)
-
-    if not session_dirs:
-        return
-
-    # 按会话最后活动时间排序（从 session 元数据文件读取 last_time）
-    session_times = {}
-    for sid in session_dirs:
-        # 读取该会话的 session 文件
-        sid_session_file = DEBUG_DIR / f".session_{sid}"
-        if sid_session_file.exists():
-            try:
-                with open(sid_session_file) as f:
-                    data = json.load(f)
-                    # 使用 last_time（最后活动时间）而非 created_at
-                    session_times[sid] = data.get("last_time", 0)
-            except:
-                session_times[sid] = 0
-        else:
-            # 如果没有 session 文件，从目录的 mtime 推断
-            session_times[sid] = min(d.stat().st_mtime for d in session_dirs[sid])
-
-    # 按最后活动时间排序（最新的在前），保留 DEBUG_MAX_ROUNDS 个会话
-    sorted_sessions = sorted(session_times.items(), key=lambda x: x[1], reverse=True)
-
-    # 删除超过限制的旧会话目录
-    for sid, _ in sorted_sessions[DEBUG_MAX_ROUNDS:]:
-        for d in session_dirs[sid]:
-            shutil.rmtree(d, ignore_errors=True)
-        # 删除对应的 session 文件
-        sid_session_file = DEBUG_DIR / f".session_{sid}"
-        if sid_session_file.exists():
-            sid_session_file.unlink(missing_ok=True)
-
+                except: pass
+            sid = datetime.now().strftime("%Y%m%d_%H%M%S")
+            data = {"session_id": sid, "created_at": now, "last_time": now, "invocation_count": 1}
+            with open(SESSION_FILE, "w") as f: json.dump(data, f)
+            return sid
+        finally: fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
 def _init_debug(command: str, args: dict):
-    """初始化本次运行的 debug 目录和日志文件。"""
-    global _debug_log_path, _debug_run_dir, _debug_step, _debug_start_time, _debug_last_time, _debug_session_id
-    if not DEBUG:
-        return
-
-    # 获取或创建会话ID（同一 Claude 对话共享）
-    _debug_session_id = _get_session_id()
-
-    # 每次调用在会话目录下创建子目录
+    global _debug_log_path, _debug_run_dir, _debug_step, _debug_start_time, _debug_last_time
+    if not DEBUG: return
+    sid = _get_session_id()
     _debug_step = 0
     _debug_start_time = time.time()
     _debug_last_time = _debug_start_time
     ts = datetime.now().strftime("%H%M%S")
-    _debug_run_dir = DEBUG_DIR / _debug_session_id / f"{ts}_{command}"
+    _debug_run_dir = DEBUG_DIR / sid / f"{ts}_{command}"
     _debug_run_dir.mkdir(parents=True, exist_ok=True)
     _debug_log_path = _debug_run_dir / "log.txt"
-    _dbg(f"=== WeChat Skill Debug ===")
-    _dbg(f"Session: {_debug_session_id}")
-    _dbg(f"Time: {ts}")
-    _dbg(f"Command: {command}")
-    _dbg(f"Args: {json.dumps(args, ensure_ascii=False)}")
-    _dbg(f"Debug dir: {_debug_run_dir}")
-
-    # 清理旧的 debug 目录（只保留最近 N 轮会话）
-    _cleanup_old_rounds()
-
+    _dbg(f"=== WeChat Skill Debug ===\nSession: {sid}\nCommand: {command}")
 
 def _dbg(msg: str):
-    """写入 debug 日志。每行包含：绝对时间、距上一步耗时(+Δ)、总耗时(T)。"""
     global _debug_last_time
-    if not DEBUG or not _debug_log_path:
-        return
+    if not DEBUG or not _debug_log_path: return
     now = time.time()
-    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    if _debug_start_time is not None:
-        total = now - _debug_start_time
-        delta = now - (_debug_last_time or now)
-        prefix = f"[{ts}] T={total:.2f}s +{delta:.2f}s"
-    else:
-        prefix = f"[{ts}]"
+    prefix = f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] T={now-_debug_start_time:.2f}s +{now-_debug_last_time:.2f}s"
     _debug_last_time = now
-    line = f"{prefix} | {msg}\n"
-    with open(_debug_log_path, "a") as f:
-        f.write(line)
-
+    with open(_debug_log_path, "a") as f: f.write(f"{prefix} | {msg}\n")
 
 def _dbg_screenshot(label: str) -> str | None:
-    """保存带标签的截图到 debug 目录，返回路径。"""
-    if not DEBUG or not _debug_run_dir:
-        return None
+    if not DEBUG or not _debug_run_dir: return None
     global _debug_step
     _debug_step += 1
-    filename = f"{_debug_step:02d}_{label}.png"
-    path = str(_debug_run_dir / filename)
+    path = str(_debug_run_dir / f"{_debug_step:02d}_{label}.png")
     take_screenshot(path)
-    _dbg(f"Screenshot: {filename}")
     return path
 
-
 def _dbg_ocr(label: str, items: list[dict]):
-    """记录 OCR 结果到日志，包含行高信息。"""
-    if not DEBUG:
-        return
+    if not DEBUG: return
     _dbg(f"OCR [{label}]: {len(items)} items")
-    sorted_items = sorted(items, key=lambda x: (x["y"], x["x"]))
-    prev_y = None
-    for i in sorted_items:
-        y_gap = f"gap={i['y'] - prev_y}" if prev_y is not None else "gap=--"
-        _dbg(f"  x={i['x']:4d} y={i['y']:3d} h={i.get('h',0):2d} {y_gap:8s} c={i['confidence']:.2f} | {i['text']}")
-        prev_y = i['y']
+    for i in sorted(items, key=lambda x: (x["y"], x["x"])):
+        _dbg(f"  x={i['x']:4d} y={i['y']:3d} c={i['confidence']:.2f} | {i['text']}")
 
-
-def _dbg_action(action: str, **kwargs):
-    """记录用户操作到日志。"""
-    if not DEBUG:
-        return
-    params = " ".join(f"{k}={v}" for k, v in kwargs.items())
-    _dbg(f"Action: {action} {params}")
-
-
-# ── 静默包装：抑制 computer_use 的 print 输出 ─────────────────────────────────
-
-@contextlib.contextmanager
-def _quiet():
-    """把 stdout 重定向到 /dev/null，使 computer_use 的 print 不可见。"""
-    with open(os.devnull, "w") as devnull:
-        old = sys.stdout
-        sys.stdout = devnull
-        try:
-            yield
-        finally:
-            sys.stdout = old
-
-
-def click(x, y, **kw):
-    with _quiet():
-        _cu.click(x, y, **kw)
-
-
-def type_text(text):
-    with _quiet():
-        _cu.type_text(text)
-
-
-def press_key(key):
-    with _quiet():
-        _cu.press_key(key)
-
-
-def scroll(x, y, direction, clicks=3):
-    with _quiet():
-        _cu.scroll(x, y, direction, clicks)
-
-
-# ── 常量 ─────────────────────────────────────────────────────────────────────
-
+# Constants
 REPLY_PREFIX_DEFAULT = "[AI分身] "
-
-# WeChat 布局（相对窗口，逻辑像素）
-SIDEBAR_W   = 60    # 左侧图标栏宽度（固定）
-SETTLE      = 0.35  # 点击后等待 UI 稳定的秒数
+SIDEBAR_W = 60
+SETTLE = 0.35
 MAX_RETRIES = 3
-
-# OCR 过滤：这些模式是 UI 噪音，不是消息内容
 _NOISE_PATTERNS = [
-    r"^\d{1,2}:\d{2}$",               # 时间戳 HH:MM
-    r"^\d{1,2}月\d{1,2}日$",           # 日期如 3月29日
-    r"^(昨天|今天|星期[一二三四五六日])$",
-    r"^发送$",
-    r"^搜索$",                         # 聊天列表顶部的搜索栏标签
-    r"^折叠置顶聊天$",                  # 底部 UI 按钮
-    r"^\[.*?\]$",                      # 系统通知如 [链接] [图片]
-    r"^-+$",
-    r"^Search$",
-    r"^\s*$",
-    r"^\d+$",                          # 纯数字（未读消息角标）
+    r"^\d{1,2}:\d{2}$", r"^\d{1,2}月\d{1,2}日$", r"^(昨天|今天|星期[一二三四五六日])$",
+    r"^\d+条新消息.*", r"^Q?\d{2}:\d{2}$", r"^发送$", r"^搜索$", r"^折叠置顶聊天$",
+    r"^\[.*?\]$", r"^-+$", r"^Search$", r"^\s*$", r"^\d+$"
 ]
 
-
-# ── WeChat 控制器 ─────────────────────────────────────────────────────────────
-
 class WeChatController:
-
-    # ── 私有：系统操作 ────────────────────────────────────────────────────────
+    def __init__(self):
+        self._layout_anchors = None
+        self._window_rect_cache = None
+        self._wechat_activated = False
+        self._last_click_pos = (0, 0)
+        self._last_screenshot = None
 
     def _activate_wechat(self, force: bool = False) -> bool:
-        """通过 AppleScript 强制激活 WeChat 到最前台。同一实例内只执行一次，除非 force=True。"""
-        if self._wechat_activated and not force:
-            return True
+        """通过 AppleScript 强制激活 WeChat 到最前台。"""
+        if self._wechat_activated and not force: return True
         script = '''
 tell application "WeChat" to activate
 delay 0.1
@@ -327,1430 +125,333 @@ tell application "System Events"
     end tell
 end tell
 '''
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=3
-        )
-        time.sleep(0.05)
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
         if result.returncode == 0:
             self._wechat_activated = True
-        return result.returncode == 0
-
-    # ── 人类仿真延迟 + 焦点安全包装 ─────────────────────────────────────────────
-
-    def _human_delay(self, x, y):
-        """根据与上次点击的距离，模拟人类鼠标移动延迟。"""
-        dx = x - self._last_click_pos[0]
-        dy = y - self._last_click_pos[1]
-        distance = math.sqrt(dx * dx + dy * dy)
-        delay = 0.05 + (distance / 3000.0) + random.uniform(-0.02, 0.02)
-        delay = max(0.05, min(0.5, delay))
-        time.sleep(delay)
-
-    def _focused_click(self, x, y, **kw):
-        """激活 WeChat + 人类延迟后单击，确保点击落在 WeChat 窗口。"""
-        _dbg_action("click", x=x, y=y, **kw)
-        self._human_delay(x, y)
-        self._activate_wechat()
-        click(x, y, **kw)
-        self._last_click_pos = (x, y)
-
-    def _focused_type(self, text, activate=True):
-        """激活 WeChat 后立即输入文字。"""
-        _dbg_action("type", text=repr(text))
-        if activate:
-            self._activate_wechat()
-        type_text(text)
-
-    def _focused_press(self, key, activate=True):
-        """激活 WeChat 后立即按键。"""
-        _dbg_action("press", key=key)
-        if activate:
-            self._activate_wechat()
-        press_key(key)
-
-    def _focused_find_text(self, target: str, mode: str = "accurate") -> list[dict]:
-        """激活 WeChat 到最前端后截图 OCR 查找文字。确保截到的是 WeChat 而非其他窗口。"""
-        self._activate_wechat()
-        return find_text(target, mode=mode)
-
-    def _focused_screen_text(self, mode: str = "accurate") -> list[dict]:
-        """激活 WeChat 到最前端后截图 OCR 获取全部文字。"""
-        self._activate_wechat()
-        return get_screen_text(mode=mode)
-
-    def _check_and_close_popup(self) -> bool:
-        """
-        检测并关闭意外的弹窗。
-        返回 True 表示检测到并关闭了弹窗。
-        """
-        # 常见弹窗关键词
-        popup_keywords = [
-            "确定", "取消", "关闭", "知道了",
-            "该公众号已迁移", "公众号已迁移",
-            "系统提示", "提示",
-        ]
-
-        items = self._focused_screen_text(mode="fast")
-        for item in items:
-            text = item["text"].strip()
-            if any(kw in text for kw in popup_keywords):
-                _dbg(f"Popup detected: '{text}' at ({item['x']}, {item['y']}), closing")
-                self._focused_press("escape")
-                time.sleep(0.2)
-                return True
+            return True
         return False
 
     def _activate_and_get_rect(self) -> tuple:
-        """激活 WeChat 并获取窗口位置，合并为单次 AppleScript 调用。"""
-        if self._wechat_activated and self._window_rect_cache:
-            return self._window_rect_cache
-
-        import pyautogui
-        sw, sh = pyautogui.size()
-
+        """激活 WeChat 并获取窗口位置。"""
+        self._activate_wechat()
         script = '''
-tell application "WeChat" to activate
-delay 0.1
 tell application "System Events"
     tell process "WeChat"
         set frontmost to true
-        set w to window "微信"
+        set w to window 1 where title is "微信"
         set p to position of w
         set s to size of w
         return ((item 1 of p) as string) & "," & ((item 2 of p) as string) & "," & ((item 1 of s) as string) & "," & ((item 2 of s) as string)
     end tell
 end tell'''
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=3
-        )
-        time.sleep(0.05)
-        self._wechat_activated = True
-
-        raw = result.stdout.strip()
-        if raw:
-            try:
+        try:
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
+            raw = result.stdout.strip()
+            if raw:
                 parts = [int(v) for v in raw.split(",")]
-                if len(parts) == 4 and parts[2] > 200:
+                if len(parts) == 4:
                     self._window_rect_cache = tuple(parts)
                     return self._window_rect_cache
-            except Exception:
-                pass
-
-        # 兜底
-        self._window_rect_cache = (sw // 2, 33, sw // 2, sh - 33)
-        return self._window_rect_cache
+        except Exception as e:
+            pass
+        
+        import pyautogui
+        sw, sh = pyautogui.size()
+        return (sw // 4, 33, sw // 2, sh - 33)
 
     def _get_window_rect(self) -> tuple:
-        """获取 WeChat 主窗口逻辑坐标 (x, y, w, h)。使用缓存。"""
-        if self._window_rect_cache:
-            return self._window_rect_cache
+        if self._window_rect_cache: return self._window_rect_cache
         return self._activate_and_get_rect()
 
-    def __init__(self):
-        self._chatlist_w_cache = None
-        self._chatlist_rect_cache = None  # 窗口 rect 变化时缓存失效
-        self._last_click_pos = (0, 0)
-        self._window_rect_cache = None
-        self._wechat_activated = False
+    def _focused_click(self, x, y):
+        self._activate_wechat(); _cu.click(x, y); self._last_click_pos = (x, y)
 
-    def _detect_chatlist_width(self, rect: tuple) -> int:
-        """
-        通过背景色差异检测聊天列表面板右边界。
-        延迟 ~50-100ms（一次截图 + 扫描）。
-        """
-        if self._chatlist_w_cache and self._chatlist_rect_cache == rect:
-            return self._chatlist_w_cache
+    def _focused_press(self, key):
+        self._activate_wechat(); _cu.press_key(key)
 
+    def _focused_find_text(self, target: str, mode: str = "accurate") -> list[dict]:
+        self._activate_wechat(); return find_text(target, mode=mode)
+
+    def _focused_screen_text(self, mode="accurate"):
+        self._activate_wechat(); return get_screen_text(mode=mode)
+
+    def _detect_absolute_layout(self, rect: tuple) -> dict:
+        if self._layout_anchors and self._window_rect_cache == rect: return self._layout_anchors
         wx, wy, ww, wh = rect
-
-        # 截图并检测
         from PIL import Image
-        screenshot_path = take_screenshot()
-        img = Image.open(screenshot_path)
+        path = take_screenshot(); self._last_screenshot = path; img = Image.open(path)
+        scan_y_v = wy + wh // 2
+        v_line_x = None
+        for x in range(wx + ww // 2, wx + ww - 50):
+            c_curr, c_left = img.getpixel((x, scan_y_v))[:3], img.getpixel((x-1, scan_y_v))[:3]
+            if sum(abs(c1-c2) for c1,c2 in zip(c_curr, c_left)) > 15:
+                pts, total = 0, 0
+                for dy in range(-wh//4, wh//4, 10):
+                    total += 1
+                    try:
+                        if sum(abs(c1-c2) for c1,c2 in zip(img.getpixel((x, scan_y_v+dy))[:3], img.getpixel((x-1, scan_y_v+dy))[:3])) > 10: pts += 1
+                    except: break
+                if pts/total > 0.7: v_line_x = x; break
+        if not v_line_x: v_line_x = wx + int(ww * 0.33)
+        scan_x_h = v_line_x + (wx+ww-v_line_x)//2
+        h_lines = []
+        for y in range(wy+20, wy+wh-20):
+            c_curr, c_up = img.getpixel((scan_x_h, y))[:3], img.getpixel((scan_x_h, y-1))[:3]
+            if sum(abs(c1-c2) for c1,c2 in zip(c_curr, c_up)) > 15:
+                matches, total = 0, 0
+                for tx in range(v_line_x+5, wx+ww-5, 10):
+                    total += 1
+                    if sum(abs(c1-c2) for c1,c2 in zip(img.getpixel((tx,y))[:3], c_curr)) < 25: matches += 1
+                if matches/total > 0.95:
+                    if not h_lines or y-h_lines[-1] > 5: h_lines.append(y)
+        bounds = [wy+30] + h_lines + [wy+wh-30]
+        max_gap, bt, bb = 0, wy+60, wy+wh-130
+        for i in range(len(bounds)-1):
+            if bounds[i+1]-bounds[i] > max_gap: max_gap = bounds[i+1]-bounds[i]; bt, bb = bounds[i], bounds[i+1]
+        anchors = {'content_x_min': v_line_x, 'content_x_max': wx+ww, 'content_y_min': bt+2, 'content_y_max': bb-2}
+        self._layout_anchors, self._window_rect_cache = anchors, rect
+        _dbg(f"Layout: V_X={v_line_x}, Y={bt+2}-{bb-2}")
+        return anchors
 
-        # 扫描 y 中线
-        scan_y = wy + wh // 2
-        scan_start = wx + SIDEBAR_W + 50   # 从侧边栏边界后50px开始（原180太大，错过边界）
-        scan_end = wx + ww * 2 // 3        # 扫描到 2/3 处
+    def _content_x_min(self, rect): return self._detect_absolute_layout(rect)['content_x_min']
+    def _detect_content_y_min(self, rect): return self._detect_absolute_layout(rect)['content_y_min']
+    def _detect_content_y_max(self, rect): return self._detect_absolute_layout(rect)['content_y_max']
+    def _chatlist_x_range(self, rect): return (rect[0]+SIDEBAR_W, self._content_x_min(rect))
 
-        # 取 chatlist 区域的典型背景色（采样点）
-        bg_color = img.getpixel((wx + SIDEBAR_W + 50, scan_y))[:3]  # RGB
-
-        chatlist_w = None
-        for x in range(scan_start, scan_end):
-            color = img.getpixel((x, scan_y))[:3]
-            diff = sum(abs(c1 - c2) for c1, c2 in zip(color, bg_color))
-            if diff > 30:  # 颜色差异阈值
-                chatlist_w = x - wx - SIDEBAR_W
-                _dbg(f"Chatlist width: detected {chatlist_w}px at x={x} (color diff={diff})")
-                break
-
-        if chatlist_w is None:
-            # fallback: 保守估算（原33%太大，改为固定180px）
-            chatlist_w = 180
-            _dbg(f"Chatlist width: fallback {chatlist_w}px")
-
-        chatlist_w = max(180, min(chatlist_w, ww // 2))
-        self._chatlist_w_cache = chatlist_w
-        self._chatlist_rect_cache = rect
-        return chatlist_w
-
-    def _chatlist_x_range(self, rect: tuple) -> tuple:
-        """返回聊天列表的 (x_min, x_max)。"""
-        wx = rect[0]
-        chatlist_w = self._detect_chatlist_width(rect)
-        return (wx + SIDEBAR_W, wx + SIDEBAR_W + chatlist_w)
-
-    def _content_x_min(self, rect: tuple) -> int:
-        """返回内容区域左边界 x。"""
-        return self._chatlist_x_range(rect)[1]
-
-    # ── 私有：导航 ────────────────────────────────────────────────────────────
-
-    def _click_search_bar(self, rect: tuple) -> int:
-        """
-        点击聊天列表顶部的"搜索"栏。
-        优先用 OCR 查找"搜索"文字，失败则 fallback 到硬编码位置。
-        返回搜索栏的 y 坐标。
-        """
+    def _click_search_bar(self, rect):
         wx, wy, ww, wh = rect
-        list_x_min, list_x_max = self._chatlist_x_range(rect)
-
-        # 尝试 OCR 查找"搜索"文字（fast 模式约 300ms）
-        search_items = self._focused_find_text("搜索", mode="fast")
-        # 筛选在聊天列表顶部区域内的结果（y 在窗口顶部 60px 内）
-        candidates = [i for i in search_items
-                      if list_x_min < i["x"] < list_x_max
-                      and wy < i["y"] < wy + 60]
-
-        if candidates:
-            best = candidates[0]
-            search_x, search_y = best["x"], best["y"]
-            _dbg(f"click_search_bar: OCR found '搜索' at ({search_x}, {search_y})")
-        else:
-            # Fallback: 硬编码位置
-            search_x = (list_x_min + list_x_max) // 2
-            search_y = wy + 30
-            _dbg(f"click_search_bar: OCR not found, fallback to ({search_x}, {search_y})")
-
-        self._focused_click(search_x, search_y)
-        time.sleep(0.15)
-        return search_y
+        xmin, xmax = self._chatlist_x_range(rect)
+        items = [i for i in self._focused_screen_text("accurate") if xmin < i["x"] < xmax and wy < i["y"] < wy + 80]
+        cands = [i for i in items if "搜索" in i["text"]]
+        if cands:
+            best = sorted(cands, key=lambda x: x["confidence"], reverse=True)[0]
+            self._focused_click(best["x"], best["y"])
+            return best["y"]
+        self._focused_click(xmin + 40, wy + 35); return wy + 35
 
     def _navigate_to_chat(self, name: str) -> bool:
-        """
-        导航到指定聊天。返回 True 表示成功。
-        策略：
-          1. 全屏 OCR 查找名字，筛选在聊天列表 x 范围内的结果
-          2. 点击"搜索"栏，输入名称，从结果中找联系人并点击
-        注意：Cmd+F 是"搜索当前对话内容"，不是联系人搜索，绝对不能用！
-        注意：不对 find_text/get_screen_text 使用 --region，因为 region 模式坐标计算有精度问题。
-        注意：所有键盘/鼠标操作必须用 _focused_xxx 方法，确保 WeChat 保持焦点。
-        """
         rect = self._activate_and_get_rect()
-        _dbg(f"Window rect: {rect}")
-        if not rect:
-            _dbg("FAIL: cannot activate WeChat or get window rect")
-            return False
-
-        # 快速检查：目标对话是否已经打开（避免不必要的导航）
-        # 先 fast 模式（~0.5s），失败则 accurate 模式（~1.3s），均比搜索路径（~7-9s）快
-        if self._verify_chat_open(name, rect, fast_only=True):
-            _dbg(f"Chat '{name}' is already open, skipping navigation")
-            return True
-        if self._verify_chat_open(name, rect, accurate_only=True):
-            _dbg(f"Chat '{name}' is already open (accurate), skipping navigation")
-            return True
-
-        wx, wy, ww, wh = rect
-        list_x_min, list_x_max = self._chatlist_x_range(rect)
-        _dbg(f"Chat list x range: {list_x_min}-{list_x_max}")
-
+        if not rect: return False
+        if self._verify_chat_open(name, rect): return True
+        xmin, xmax = self._chatlist_x_range(rect)
         for attempt in range(MAX_RETRIES):
-            _dbg(f"--- Attempt {attempt + 1}/{MAX_RETRIES} ---")
-            _dbg_screenshot(f"nav_attempt{attempt+1}_before")
-
-            # Step 1: 全屏 OCR 查找名字，筛选在聊天列表 x 范围内（fast 足够）
-            _dbg(f"Step 1: find_text('{name}', fast)")
-            all_results = self._focused_find_text(name, mode="fast")
-            _dbg_ocr(f"find_{name}", all_results)
-            outside = [r for r in all_results if r["x"] < wx or r["x"] > wx+ww or r["y"] < wy or r["y"] > wy+wh]
-            if outside:
-                _dbg(f"WARNING: {len(outside)} OCR results outside WeChat window (terminal contamination?)")
-            list_matches = [r for r in all_results
-                            if list_x_min < r["x"] < list_x_max
-                            and wy < r["y"] < wy + wh
-                            and r["confidence"] >= 0.7]
-            _dbg(f"Chat list matches: {len(list_matches)}")
-
-            if list_matches:
-                best = sorted(list_matches, key=lambda r: r["confidence"], reverse=True)[0]
-                _dbg(f"Clicking best match: x={best['x']} y={best['y']} '{best['text']}'")
+            _dbg(f"Nav attempt {attempt+1}")
+            all_res = self._focused_find_text(name, mode="fast")
+            matches = [r for r in all_res if xmin < r["x"] < xmax and r["confidence"] >= 0.7]
+            if matches:
+                best = sorted(matches, key=lambda r: r["confidence"], reverse=True)[0]
                 self._focused_click(best["x"], best["y"])
                 time.sleep(SETTLE)
-
-                # 检测并关闭可能的弹窗
-                self._check_and_close_popup()
-
-                _dbg_screenshot(f"nav_attempt{attempt+1}_after_click")
-                verified = self._verify_chat_open(name, rect, accurate_only=True)
-                _dbg(f"Verify (1st): {verified}")
-                if verified:
-                    return True
-                time.sleep(0.5)
-                verified = self._verify_chat_open(name, rect, accurate_only=True)
-                _dbg(f"Verify (2nd, after 0.5s wait): {verified}")
-                if verified:
-                    return True
-                _dbg("Click didn't open chat, will retry OCR (no re-click)")
-                continue
-
-            # Step 2: 聊天列表中没直接找到 → 通过搜索栏查找
-            # 策略：输入名字后，用全屏 OCR 找到"联系人"分类标题，
-            # 然后点击"联系人"标题下方的第一个匹配条目。
-            _dbg("Step 2: search bar path")
+                if self._verify_chat_open(name, rect): return True
             self._focused_press("escape")
-            time.sleep(0.15)
-            search_bar_y = self._click_search_bar(rect)
-            time.sleep(0.15)
-
-            self._focused_press("command+a", activate=False)
-            time.sleep(0.05)
-            # 搜索框必须用剪贴板粘贴，避免输入法拦截（如拼音上屏）
+            self._click_search_bar(rect)
+            time.sleep(0.3)
             subprocess.run(["pbcopy"], input=name.encode("utf-8"), check=True)
-            self._focused_press("command+v", activate=False)
-            _dbg_action("paste_search", text=name)
-            time.sleep(2.5)  # 等待搜索结果完整加载（群聊/联系人分区需要时间渲染）
-
-            _dbg_screenshot(f"nav_attempt{attempt+1}_search_results")
-            # 全屏 OCR 获取搜索面板的完整布局（必须 accurate，fast 中文乱码严重）
-            all_text = self._focused_screen_text(mode="accurate")
-            # 筛选 WeChat 窗口内的文字
-            wechat_text = [i for i in all_text if wx < i["x"] < wx + ww and wy < i["y"] < wy + wh]
-            wechat_text.sort(key=lambda i: i["y"])
-            _dbg(f"Search panel OCR: {len(wechat_text)} items in WeChat window")
-            for i in wechat_text:
-                _dbg(f"  x={i['x']:4d} y={i['y']:3d} h={i.get('h',0):2d} c={i['confidence']:.2f} | {i['text']}")
-
-            # 收集分类标题及其 y 范围
-            section_headers = []
-            for i in wechat_text:
-                if i["text"].strip() in ("联系人", "群聊", "聊天记录", "搜索网络结果"):
-                    section_headers.append(i)
-            section_headers.sort(key=lambda i: i["y"])
-            _dbg(f"Section headers: {[(h['text'], h['y']) for h in section_headers]}")
-
-            # 构建各分类的 y 范围
-            section_ranges = {}
-            for idx, hdr in enumerate(section_headers):
-                y_end = section_headers[idx + 1]["y"] if idx + 1 < len(section_headers) else wy + wh
-                section_ranges[hdr["text"].strip()] = (hdr["y"], y_end)
-
-            # 在"联系人"和"群聊"分区中收集候选项，每个分区取标题下方的第一个匹配
-            candidates = []
-            best = None
-            name_lower = name.lower().replace(" ", "")
-            for section_name in ("联系人", "群聊"):
-                if section_name not in section_ranges:
-                    continue
-                y_start, y_end = section_ranges[section_name]
-                # 严格在分区标题之下、下一分区标题之上
-                section_items = [i for i in wechat_text
-                                 if y_start < i["y"] < y_end]
-                # 按 y 排序，确保取分区标题下方最近的匹配项
-                section_items.sort(key=lambda i: i["y"])
-                for i in section_items:
-                    text_clean = i["text"].strip().replace(" ", "").lower()
-                    # 去除 WeChat 群前缀如 [净]
-                    text_bare = re.sub(r'[\[［].*?[\]］]', '', text_clean).strip()
-                    if name_lower in text_clean or text_clean in name_lower \
-                            or name_lower in text_bare:
-                        is_exact = (name_lower == text_clean or name_lower == text_bare)
-                        candidates.append({
-                            "item": i,
-                            "section": section_name,
-                            "exact": is_exact,
-                        })
-                        _dbg(f"Candidate in '{section_name}': x={i['x']} y={i['y']} "
-                             f"'{i['text']}' exact={is_exact}")
-                        break  # 每个分区只取第一个匹配
-
-            if candidates:
-                # 精确匹配优先，同等条件下优先联系人
-                candidates.sort(key=lambda c: (
-                    not c["exact"],
-                    c["section"] != "联系人",
-                ))
-                best = candidates[0]["item"]
-                _dbg(f"Selected from '{candidates[0]['section']}': '{best['text']}'")
-
-            if not best and not section_ranges:
-                _dbg("No section headers found, falling back to name match")
-                for i in wechat_text:
-                    if i["y"] <= search_bar_y + 15:
-                        continue
-                    text_clean = i["text"].strip().replace(" ", "").lower()
-                    if name_lower in text_clean or text_clean in name_lower:
-                        best = i
-                        _dbg(f"Fallback match: x={i['x']} y={i['y']} '{i['text']}'")
-                        break
-
-            if best:
-                _dbg(f"Opening search result via click: '{best['text']}' at x={best['x']} y={best['y']}")
-
-                # 直接点击搜索结果（最可靠的方式，避免键盘导航的不确定性）
-                self._focused_click(best["x"], best["y"])
-                time.sleep(SETTLE)
-
-                # 检测并关闭可能的弹窗
-                self._check_and_close_popup()
-
-                _dbg_screenshot(f"nav_attempt{attempt+1}_after_search_click")
-                verified = self._verify_chat_open(name, rect, accurate_only=True)
-                _dbg(f"Verify after search click: {verified}")
-                if verified:
-                    # 搜索面板可能还在，按 Escape 关闭后再返回
-                    self._focused_press("escape")
-                    time.sleep(0.15)
-                    _dbg("Search panel closed, navigation complete")
-                    return True
-
+            self._focused_press("command+v")
+            time.sleep(3.0)
+            all_txt = [i for i in self._focused_screen_text("accurate") if rect[0] < i["x"] < rect[0]+rect[2]]
+            all_txt.sort(key=lambda i: i["y"])
+            target = None
+            for i in all_txt:
+                if name.lower() in i["text"].lower().replace(" ", ""): target = i; break
+            if target:
+                self._focused_click(target["x"], target["y"])
+                time.sleep(1.0)
+                if self._verify_chat_open(name, rect): return True
             self._focused_press("escape")
-            time.sleep(0.15)
-
-        _dbg("FAIL: all attempts exhausted")
         return False
 
-    def _is_group_chat(self, rect: tuple) -> bool:
-        """检测当前打开的是否为群聊。群聊标题栏显示 (N) 格式的成员数。"""
-        wx, wy, ww, wh = rect
-        cx_min = self._content_x_min(rect)
-        title_items = [i for i in self._focused_screen_text(mode="fast")
-                       if cx_min < i["x"] < wx + ww and wy < i["y"] < wy + 40]
-        for item in title_items:
-            if re.search(r'\(\d+\)', item["text"]):
-                _dbg(f"Group chat detected: '{item['text']}'")
-                return True
-        _dbg("Not a group chat (no member count in title)")
-        return False
+    def _is_group_chat(self, rect):
+        xmin, xmax = self._content_x_min(rect), rect[0]+rect[2]
+        ymin, ymax = rect[1], self._detect_content_y_min(rect)
+        title_items = [i for i in self._focused_screen_text("fast") if xmin < i["x"] < xmax and ymin < i["y"] < ymax]
+        return any(re.search(r'\(\d+\)', i["text"]) for i in title_items)
 
-    def _verify_chat_open(self, name: str, rect: tuple, fast_only: bool = False, accurate_only: bool = False) -> bool:
-        """
-        检查对话是否成功打开。
-        用单次 OCR 获取标题栏所有文字，再在内存中做子串匹配。
-        验证条件：标题栏文字包含 name 或其前缀子串。
-        """
-        wx, wy, ww, wh = rect
-        # 标题栏横跨整个窗口，不只是内容区
-        cx_min = wx + SIDEBAR_W  # 从侧栏右边界开始，避免匹配侧栏图标
-        cx_max = wx + ww
-        cy_min = wy
-        cy_max = wy + 40
+    def _verify_chat_open(self, name, rect):
+        xmin, xmax = rect[0]+SIDEBAR_W, rect[0]+rect[2]
+        ymin, ymax = rect[1], self._detect_content_y_min(rect)
+        items = [i for i in self._focused_screen_text("fast") if xmin < i["x"] < xmax and ymin < i["y"] < ymax]
+        return any(name.lower()[:2] in i["text"].lower() for i in items if len(i["text"])>=2)
 
-        # 构建匹配关键词：完整名字 → 逐步缩短前缀 → 单个词组
-        keywords = [name]
-        for i in range(len(name) - 1, 2, -1):
-            prefix = name[:i]
-            if prefix not in keywords:
-                keywords.append(prefix)
-        for p in re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z0-9]+', name):
-            if p not in keywords and len(p) >= 2:
-                keywords.append(p)
+    def _is_noise(self, text):
+        t = text.strip()
+        if not t or (len(t) <= 1 and not re.match(r'[\u4e00-\u9fff]', t)): return True
+        return any(re.match(p, t) for p in _NOISE_PATTERNS)
 
-        # 决定 OCR 模式
-        if accurate_only:
-            modes = ("accurate",)
-        elif fast_only:
-            modes = ("fast",)
-        else:
-            modes = ("fast", "accurate")
-
-        for mode in modes:
-            # 单次全屏 OCR，过滤出标题栏区域的文字
-            all_items = self._focused_screen_text(mode=mode)
-            title_items = [i for i in all_items
-                           if cx_min < i["x"] < cx_max
-                           and cy_min < i["y"] < cy_max]
-
-            # 逐项验证：只有当某个 OCR 项的文字本身就包含关键词（不是组合文字）时才通过
-            # 这样可以避免搜索面板文字和标题栏文字混在一起导致的误判
-            for item in title_items:
-                item_text = item["text"].strip()
-                for kw in keywords:
-                    if len(kw) < 2:
-                        continue
-                    if kw in item_text:
-                        _dbg(f"Verify [{mode}]: matched '{kw}' in item: x={item['x']} y={item['y']} c={item['confidence']:.2f} '{item_text}'")
-                        return True
-
-            all_title_text = " ".join(i["text"] for i in title_items)
-            _dbg(f"Verify [{mode}]: title bar items={len(title_items)}, combined='{all_title_text}' (x:{cx_min}-{cx_max}, y:{cy_min}-{cy_max})")
-            _dbg(f"Verify [{mode}]: no keyword matched in individual items")
-        return False
-
-    # ── 私有：读取消息 ────────────────────────────────────────────────────────
-
-    def _read_content_area(self, rect: tuple) -> tuple[list[dict], str | None]:
-        """
-        OCR 内容区域，返回 (原始条目列表, 截图路径)。
-        使用全屏 OCR 再按坐标过滤，避免 region 模式的坐标计算误差。
-        截图路径供后续视觉元素检测使用。
-        """
-        wx, wy, ww, wh = rect
-        cx_min = self._content_x_min(rect)
-        content_x_max = wx + ww
-        content_y_min = wy + 40
-        content_y_max = wy + wh - 130
-
-        screenshot_path = _dbg_screenshot("read_content_area")
-        all_items = self._focused_screen_text(mode="accurate")
-        filtered = [i for i in all_items
-                    if cx_min < i["x"] < content_x_max
-                    and content_y_min < i["y"] < content_y_max]
-        _dbg_ocr("content_area", filtered)
-        # 保存最新截图路径（非 debug 模式也需要截图用于视觉检测）
-        if not screenshot_path:
-            screenshot_path = take_screenshot()
-            self._last_screenshot = screenshot_path
-        else:
-            self._last_screenshot = screenshot_path
-        return filtered, screenshot_path
-
-    def _is_noise(self, text: str) -> bool:
-        """判断是否是 UI 噪音（时间戳、系统词等）。"""
-        text = text.strip()
-        for pat in _NOISE_PATTERNS:
-            if re.match(pat, text):
-                return True
-        return False
-
-    # 分类标签中英映射（VNClassifyImageRequest 返回英文标签）
-    _CLASSIFY_LABEL_MAP = {
-        "bedroom": "卧室", "bathroom": "浴室", "kitchen": "厨房",
-        "living_room": "客厅", "dining_room": "餐厅", "office": "办公室",
-        "building": "建筑", "structure": "建筑", "house": "房屋",
-        "food": "食物", "drink": "饮料", "fruit": "水果",
-        "people": "人物", "adult": "成人", "baby": "婴儿", "child": "儿童",
-        "face": "人脸", "portrait": "人像",
-        "animal": "动物", "cat": "猫", "dog": "狗", "bird": "鸟",
-        "car": "汽车", "vehicle": "车辆", "bicycle": "自行车",
-        "flower": "花", "plant": "植物", "tree": "树",
-        "sky": "天空", "ocean": "海洋", "mountain": "山", "beach": "海滩",
-        "sunset": "日落", "landscape": "风景", "nature": "自然",
-        "text": "文字", "document": "文档", "screenshot": "截图",
-        "pillow": "枕头", "bedding": "床上用品", "housewares": "家居用品",
-        "clothing": "服装", "shoe": "鞋子", "bag": "包",
-        "toy": "玩具", "book": "书", "phone": "手机",
-        "sport": "运动", "game": "游戏",
-    }
-
-    def _classify_image_region(self, arr: 'np.ndarray', bx: int, by: int, bw: int, bh: int) -> str:
-        """
-        用 macOS Vision VNClassifyImageRequest 对裁剪区域做本地图像分类。
-        返回中文描述（如"卧室/床上用品"），失败返回空字符串。
-        """
+    def _detect_visual_elements(self, screenshot_path, ocr_items, rect):
         from PIL import Image
-        import tempfile
-
-        try:
-            h_px, w_px = arr.shape[:2]
-            region = arr[max(0, by):min(h_px, by + bh), max(0, bx):min(w_px, bx + bw)]
-            if region.size == 0:
-                return ""
-
-            # 保存裁剪区域为临时文件
-            crop_img = Image.fromarray(region)
-            tmp_path = tempfile.mktemp(suffix=".png")
-            crop_img.save(tmp_path)
-
-            # VNClassifyImageRequest
-            url = NSURL.fileURLWithPath_(tmp_path)
-            source = CGImageSourceCreateWithURL(url, None)
-            cg_image = CGImageSourceCreateImageAtIndex(source, 0, None)
-            if not cg_image:
-                return ""
-
-            req = VNClassifyImageRequest.alloc().init()
-            handler = VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, {})
-            handler.performRequests_error_([req], None)
-            results = req.results()
-
-            Path(tmp_path).unlink(missing_ok=True)
-
-            if not results:
-                return ""
-
-            # 取置信度 > 0.15 的标签，排除 document/screenshot（截图本身的噪音）
-            skip = {"document", "screenshot", "machine", "consumer_electronics", "computer", "computer_monitor"}
-            labels = []
-            for r in sorted(results, key=lambda r: r.confidence(), reverse=True):
-                ident = str(r.identifier())
-                conf = float(r.confidence())
-                if conf < 0.15:
-                    break
-                if ident in skip:
-                    continue
-                zh = self._CLASSIFY_LABEL_MAP.get(ident, ident)
-                labels.append(zh)
-                if len(labels) >= 3:
-                    break
-
-            desc = "/".join(labels) if labels else ""
-            _dbg(f"classify_image: {desc}")
-            return desc
-
-        except Exception as e:
-            _dbg(f"classify_image error: {e}")
-            return ""
-
-    def _detect_visual_elements(self, screenshot_path: str, ocr_items: list[dict], rect: tuple) -> tuple[list[dict], list[dict]]:
-        """
-        检测内容区域中的非文字视觉元素（图片、表情包、emoji）。
-
-        原理：WeChat 聊天背景为浅灰色。在 OCR 文字区域之外，若存在大面积
-        非背景色像素簇，即为图片/表情/emoji。按区域大小分类：
-          - 宽 > 80px 且高 > 60px → [图片] (附带 VNClassifyImageRequest 内容描述)
-          - 宽 15~80px 且高 15~60px → [表情]
-          - 更小 → 忽略（可能是 UI 碎片）
-
-        返回: (visual_elements, avatars, quote_bubbles)
-        - visual_elements: [{"type": "image"|"sticker", "x": int, "y": int, "w": int, "h": int, "sender": str, "desc": str}]
-        - avatars: [{"x": int, "y": int, "w": int, "h": int, "center_x": int, "center_y": int}]
-        - quote_bubbles: [{"x": int, "y": int, "w": int, "h": int}]  # 灰色引用气泡
-        坐标为逻辑坐标（与 OCR 一致）。
-        """
-        from PIL import Image
-
-        if not screenshot_path or not Path(screenshot_path).exists():
-            _dbg("detect_visual: no screenshot available")
-            return [], [], []
-
-        wx, wy, ww, wh = rect
-        cx_min = self._content_x_min(rect)
-        content_x_max = wx + ww
-        content_y_min = wy + 40
-        content_y_max = wy + wh - 130
-        midline_x = cx_min + (content_x_max - cx_min) // 2
-
-        img = Image.open(screenshot_path)
-        scale = img.size[0] / SCREEN_W  # Retina 2x
-
-        # 裁剪内容区域（物理像素）
-        crop_box = (
-            int(cx_min * scale), int(content_y_min * scale),
-            int(content_x_max * scale), int(content_y_max * scale),
-        )
-        content_img = img.crop(crop_box)
-        arr = np.array(content_img)
-
-        # WeChat 聊天背景色检测：取四个角落 10x10 区域的中位色
+        img = Image.open(screenshot_path); scale = img.size[0] / SCREEN_W
+        xmin, xmax = self._content_x_min(rect), rect[0]+rect[2]
+        ymin, ymax = self._detect_content_y_min(rect), self._detect_content_y_max(rect)
+        arr = np.array(img.crop((int(xmin*scale), int(ymin*scale), int(xmax*scale), int(ymax*scale))))
+        if arr.ndim == 2: return [], [], []
+        if arr.shape[2] == 4: arr = arr[:, :, :3]
         h_px, w_px = arr.shape[:2]
-        # 确保图片至少有 RGB 3 通道；RGBA 则只取前 3 通道
-        if arr.ndim == 2:
-            _dbg("detect_visual: grayscale image, skipping")
-            return [], [], []
-        if arr.shape[2] == 4:
-            arr = arr[:, :, :3]
-        cs = min(10, h_px, w_px)  # 角落取样大小
-        corners = [
-            arr[:cs, :cs],
-            arr[:cs, -cs:],
-            arr[-cs:, :cs],
-            arr[-cs:, -cs:],
-        ]
-        bg_color = np.median(np.concatenate([c.reshape(-1, 3) for c in corners], axis=0), axis=0)
-        _dbg(f"detect_visual: bg_color={bg_color.astype(int).tolist()}")
-
-        # 计算每个像素与背景色的色差（欧氏距离）
-        diff = np.sqrt(np.sum((arr.astype(float) - bg_color) ** 2, axis=2))
-
-        # 色差阈值：> 15 认为是非背景内容（降低以检测低对比度头像）
-        mask = (diff > 15).astype(np.uint8)
-
-        # 排除 OCR 已识别的文字区域（在 mask 上置零）
-        for item in ocr_items:
-            # 转换为相对于裁剪区域的物理像素坐标
-            ix = int((item["x"] - cx_min) * scale)
-            iy = int((item["y"] - content_y_min) * scale)
-            iw = int(item.get("w", 30) * scale)
-            ih = int(item.get("h", 15) * scale)
-            # 扩大文字区域边距，避免文字边缘被误检
-            pad = int(8 * scale)
-            x1 = max(0, ix - iw // 2 - pad)
-            y1 = max(0, iy - ih // 2 - pad)
-            x2 = min(w_px, ix + iw // 2 + pad)
-            y2 = min(h_px, iy + ih // 2 + pad)
-            mask[y1:y2, x1:x2] = 0
-
-        # 连通域分析：找非背景像素簇
-        # 简化实现：按行扫描，用 run-length 找连续非零区域，再垂直合并
-        visual_elements = []
-        avatars = []
-        quote_bubbles = []  # 灰色引用气泡列表
+        bg_color = np.median(arr[:10, :10].reshape(-1,3), axis=0)
+        mask = (np.sqrt(np.sum((arr.astype(float)-bg_color)**2, axis=2)) > 15).astype(np.uint8)
+        for i in ocr_items:
+            ix, iy = int((i["x"]-xmin)*scale), int((i["y"]-ymin)*scale)
+            pad = int(8*scale)
+            mask[max(0,iy-pad):min(h_px,iy+pad), max(0,ix-pad):min(w_px,ix+pad)] = 0
+        visuals, avatars, quotes = [], [], []
         visited = np.zeros_like(mask, dtype=bool)
-
-        def _flood_bbox(sy, sx):
-            """简单 BFS 找连通域的外接矩形。"""
+        def _flood(sy, sx):
             from collections import deque
-            q = deque([(sy, sx)])
-            visited[sy, sx] = True
-            min_y, max_y = sy, sy
-            min_x, max_x = sx, sx
-            count = 0
-            # 用步长加速扫描（每 2 像素采样）
-            step = 2
+            q, mn_y, mx_y, mn_x, mx_x = deque([(sy, sx)]), sy, sy, sx, sx
+            visited[sy,sx] = True
             while q:
                 cy, cx = q.popleft()
-                count += 1
-                if count > 50000:  # 防止超大区域卡死
-                    break
-                for dy, dx in [(-step, 0), (step, 0), (0, -step), (0, step)]:
-                    ny, nx = cy + dy, cx + dx
-                    if 0 <= ny < h_px and 0 <= nx < w_px and not visited[ny, nx] and mask[ny, nx]:
-                        visited[ny, nx] = True
-                        min_y = min(min_y, ny)
-                        max_y = max(max_y, ny)
-                        min_x = min(min_x, nx)
-                        max_x = max(max_x, nx)
-                        q.append((ny, nx))
-            return min_x, min_y, max_x - min_x, max_y - min_y, count
-
-        # 降采样扫描（每 4 像素检查一次，提高速度）
-        scan_step = 4
-        for y in range(0, h_px, scan_step):
-            for x in range(0, w_px, scan_step):
-                if mask[y, x] and not visited[y, x]:
-                    bx, by, bw, bh, pixel_count = _flood_bbox(y, x)
-                    # 转换回逻辑坐标
-                    lx = bx / scale + cx_min
-                    ly = by / scale + content_y_min
-                    lw = bw / scale
-                    lh = bh / scale
-                    center_x = lx + lw / 2
-
-                    # 排除头像：约 30~45px 正方形
-                    # 左侧头像：在内容区左侧 400px 范围内（原250，窗口变窄后扩大）
-                    # 右侧头像：在内容区右侧 80px 范围内（自己的头像紧贴右边框）
-                    is_left_avatar = cx_min <= lx <= cx_min + 400
-                    is_right_avatar = (content_x_max - 80) <= (lx + lw) <= content_x_max
-                    is_avatar = (25 < lw < 50 and 25 < lh < 50
-                                 and abs(lw - lh) < 10  # 近似正方形
-                                 and (is_left_avatar or is_right_avatar))
-                    if is_avatar:
-                        avatars.append({
-                            "x": int(lx),
-                            "y": int(ly),
-                            "w": int(lw),
-                            "h": int(lh),
-                            "center_x": int(center_x),
-                            "center_y": int(ly + lh / 2),
-                            "is_me": is_right_avatar,  # 右侧头像 = 用户的头像
-                        })
-                        _dbg(f"detect_visual: avatar at ({int(center_x)},{int(ly+lh/2)}) {int(lw)}x{int(lh)} is_me={is_right_avatar}")
+                for dy, dx in [(-2,0),(2,0),(0,-2),(0,2)]:
+                    ny, nx = cy+dy, cx+dx
+                    if 0<=ny<h_px and 0<=nx<w_px and not visited[ny,nx] and mask[ny,nx]:
+                        visited[ny,nx]=True; mn_y=min(mn_y,ny); mx_y=max(mx_y,ny); mn_x=min(mn_x,nx); mx_x=max(mx_x,nx); q.append((ny,nx))
+            return mn_x, mn_y, mx_x-mn_x, mx_y-mn_y
+        for y in range(0, h_px, 4):
+            for x in range(0, w_px, 4):
+                if mask[y,x] and not visited[y,x]:
+                    bx, by, bw, bh = _flood(y, x)
+                    lx, ly, lw, lh = bx/scale+xmin, by/scale+ymin, bw/scale, bh/scale
+                    cx = lx + lw/2
+                    if 25<lw<50 and 25<lh<50 and abs(lw-lh)<10:
+                        avatars.append({"x":int(lx),"y":int(ly),"w":int(lw),"h":int(lh),"is_me":cx>(xmin+(xmax-xmin)*0.8)})
                         continue
+                    std = np.std(arr[by:by+bh, bx:bx+bw].reshape(-1,3), axis=0).mean()
+                    if 20<=std<45 and 50<lw<600 and 15<lh<150: quotes.append({"x":int(lx),"y":int(ly),"w":int(lw),"h":int(lh)}); continue
+                    if std < 20: continue
+                    visuals.append({"type":"image" if lw>80 else "sticker", "x":int(cx), "y":int(ly+lh/2), "sender":"me" if cx>(xmin+(xmax-xmin)//2) else "them"})
+        return visuals, avatars, quotes
 
-                    # 排除消息气泡背景（白色/绿色矩形，覆盖面积大但颜色单一）
-                    # 取区域内像素的色彩标准差，低则为纯色块（气泡），高则为图片
-                    region_slice = arr[max(0,by):min(h_px,by+bh), max(0,bx):min(w_px,bx+bw)]
-                    if region_slice.size > 0:
-                        color_std = np.std(region_slice.reshape(-1, 3).astype(float), axis=0).mean()
+    def _read_content_area(self, rect: tuple) -> tuple[list[dict], str | None]:
+        xmin, xmax = self._content_x_min(rect), rect[0]+rect[2]
+        ymin, ymax = self._detect_content_y_min(rect), self._detect_content_y_max(rect)
+        path = take_screenshot()
+        self._last_screenshot = path
+        all_items = self._focused_screen_text(mode="accurate")
+        filtered = [i for i in all_items if xmin < i["x"] < xmax and ymin < i["y"] < ymax]
+        return filtered, path
 
-                        # 检测灰色引用气泡：
-                        # 特征：颜色标准差 20~45（内有文字但非图片）、宽度较大、高度较小
-                        if 20 <= color_std < 45 and 50 < lw < 600 and 15 < lh < 150:
-                            quote_bubbles.append({
-                                "x": int(lx), "y": int(ly),
-                                "w": int(lw), "h": int(lh)
-                            })
-                            _dbg(f"detect_visual: quote bubble at ({int(lx)},{int(ly)}) {int(lw)}x{int(lh)} color_std={color_std:.1f}")
-                            continue
-
-                        _dbg(f"detect_visual: region ({int(lw)}x{int(lh)}) color_std={color_std:.1f}")
-                        if color_std < 20:
-                            _dbg(f"detect_visual: skipped low-variance region (bubble/bg)")
-                            continue
-
-                    # 分类
-                    if lw > 80 and lh > 60:
-                        elem_type = "image"
-                    elif lw > 15 and lh > 15:
-                        elem_type = "sticker"
-                    else:
-                        continue  # 太小，忽略
-
-                    sender = "me" if center_x >= midline_x else "them"
-                    desc = ""
-
-                    # 图片内容识别：裁剪区域用 VNClassifyImageRequest 本地分类
-                    if elem_type == "image":
-                        desc = self._classify_image_region(arr, bx, by, bw, bh)
-
-                    visual_elements.append({
-                        "type": elem_type,
-                        "x": int(center_x),
-                        "y": int(ly + lh / 2),
-                        "w": int(lw),
-                        "h": int(lh),
-                        "sender": sender,
-                        "desc": desc,
-                    })
-                    _dbg(f"detect_visual: {elem_type} at ({int(center_x)},{int(ly+lh/2)}) {int(lw)}x{int(lh)} sender={sender} desc='{desc}'")
-
-        _dbg(f"detect_visual: found {len(visual_elements)} visual elements, {len(avatars)} avatars, {len(quote_bubbles)} quote_bubbles")
-        return visual_elements, avatars, quote_bubbles
-
-    def _parse_messages(self, ocr_items: list[dict], rect: tuple, screenshot_path: str = None, is_group: bool = False) -> list[dict]:
-        """
-        将 OCR 条目 + 视觉元素解析为结构化消息列表。
-
-        设计原则（按用户要求）：
-        1. 头像上边框Y = 消息起始锚点，下一头像上边框Y = 消息结束
-        2. 群聊：紧贴左侧头像的多行文字 → 第一行=nickname，其余=消息内容
-        3. 1:1聊天：content标题即为nickname
-        4. 右侧头像旁的文字 = 我的发言
-
-        返回: [{"sender": "me"|"昵称"|"them", "text": str}, ...]
-        """
-        wx, wy, ww, wh = rect
-        content_x = self._content_x_min(rect)
-        content_w = wx + ww - content_x
-        midline_x = content_x + content_w // 2
-
+    def _parse_messages(self, ocr_items, rect, screenshot_path=None, is_group=False):
+        xmin, xmax = self._content_x_min(rect), rect[0]+rect[2]
+        ymin, ymax = self._detect_content_y_min(rect), self._detect_content_y_max(rect)
+        mid_x = xmin + (xmax-xmin)//2
         items = [i for i in ocr_items if not self._is_noise(i["text"])]
-
-        visual_items = []
-        avatars = []
-        quote_bubbles = []
-        if screenshot_path:
-            visual_items, avatars, quote_bubbles = self._detect_visual_elements(screenshot_path, ocr_items, rect)
-
-        all_items = []
-
+        vis, avs, qbs = [], [], []
+        if screenshot_path: vis, avs, qbs = self._detect_visual_elements(screenshot_path, ocr_items, rect)
+        all_msgs = []
         if is_group:
-            # ── 群聊 ──────────────────────────────────────────────
-            # content 边界
-            content_x = self._content_x_min(rect)  # content 左边框 X
-            content_x_max = wx + ww                 # content 右边框 X
-
-            # 合并所有头像并按Y排序（下一个头像不区分左右）
-            all_avatars = sorted(avatars, key=lambda a: a["y"])
-
-            _dbg(f"Group: {len(all_avatars)} avatars, content_x={content_x}, content_x_max={content_x_max}")
-
-            # ── 遍历每个头像，划分消息区域 ───────────────────────────────────
-            for i, av in enumerate(all_avatars):
-                av_top = av["y"]
-                av_left = av["x"]
-                av_right = av["x"] + av["w"]
-                is_me = av.get("is_me", False)
-
-                # 消息区域：头像顶部 → 下一头像顶部（不区分左右）
-                if i + 1 < len(all_avatars):
-                    msg_bottom = all_avatars[i + 1]["y"]
-                else:
-                    msg_bottom = wy + wh + 200
-
-                if is_me:
-                    # 我：头像在右边，消息在头像左边
-                    # X 范围：content 左边框 → 头像左边界
-                    msg_texts = []
-                    for item in items:
-                        ix, iy = item["x"], item["y"]
-                        if content_x <= ix <= av_left and av_top <= iy <= msg_bottom:
-                            msg_texts.append((iy, ix, item["text"].strip()))
-                else:
-                    # 他人：头像在左边，消息在头像右边
-                    # X 范围：头像右边界 → content 右边框
-                    msg_texts = []
-                    for item in items:
-                        ix, iy = item["x"], item["y"]
-                        if av_right <= ix <= content_x_max and av_top <= iy <= msg_bottom:
-                            msg_texts.append((iy, ix, item["text"].strip()))
-
-                if not msg_texts:
-                    continue
-
-                # ── 检测并提取引用内容 ──────────────────────────────────────────
-                current_quotes = []
-                for qb in quote_bubbles:
-                    qb_center_x = qb["x"] + qb["w"] / 2
-                    qb_center_y = qb["y"] + qb["h"] / 2
-                    if av_top <= qb_center_y <= msg_bottom:
-                        if (is_me and content_x <= qb_center_x <= av_left) or \
-                           (not is_me and av_right <= qb_center_x <= content_x_max):
-                            current_quotes.append(qb)
-                
-                quote_summary = ""
-                if current_quotes:
-                    # 将落在引用气泡内的文字提取出来
-                    quoted_parts = []
-                    remaining_msg_texts = []
-                    for iy, ix, text in msg_texts:
-                        is_inside_quote = False
-                        for qb in current_quotes:
-                            # 允许一点边距误差 (5px)
-                            if (qb["x"] - 5 <= ix <= qb["x"] + qb["w"] + 5 and 
-                                qb["y"] - 5 <= iy <= qb["y"] + qb["h"] + 5):
-                                is_inside_quote = True
-                                break
-                        if is_inside_quote:
-                            quoted_parts.append(text)
-                        else:
-                            remaining_msg_texts.append((iy, ix, text))
-                    
-                    if quoted_parts:
-                        quote_summary = f"[引用: {' '.join(quoted_parts)}]"
-                        msg_texts = remaining_msg_texts # 更新，排除已引用的文字
-
-                # 按Y排序（先出现的行在上）
-                msg_texts.sort(key=lambda x: x[0])
-
-                if is_me:
-                    sender = "me"
-                    # 合并文字，保留换行（Y差距>15px视为换行）
-                    parts = []
-                    if quote_summary:
-                        parts.append(quote_summary + "\n")
-                    for i, (iy, ix, text) in enumerate(msg_texts):
-                        if i > 0 and iy - msg_texts[i-1][0] > 15:
-                            parts.append("\n")
-                        parts.append(text)
-                    body_texts = ["".join(parts)]
-                else:
-                    # 他人：第一行=nickname，其余=发言内容
-                    sender = msg_texts[0][2] if msg_texts else "them"
-                    body_parts = []
-                    if quote_summary:
-                        body_parts.append(quote_summary + "\n")
-                    for i, (iy, ix, text) in enumerate(msg_texts[1:], start=1):
-                        if i > 1 and iy - msg_texts[i-1][0] > 15:
-                            body_parts.append("\n")
-                        body_parts.append(text)
-                    body_texts = ["".join(body_parts)] if body_parts else ([quote_summary] if quote_summary else [])
-
-                # 收集视觉元素（图片/表情）
-                msg_images = []
-                for ve in visual_items:
-                    if av_top <= ve["y"] <= msg_bottom:
-                        if is_me:
-                            if content_x <= ve["x"] <= av_left:
-                                if ve["type"] == "image":
-                                    desc = ve.get("desc", "")
-                                    msg_images.append(f"[图片:{desc}]" if desc else "[图片]")
-                                else:
-                                    msg_images.append("[表情]")
-                        else:
-                            if av_right <= ve["x"] <= content_x_max:
-                                if ve["type"] == "image":
-                                    desc = ve.get("desc", "")
-                                    msg_images.append(f"[图片:{desc}]" if desc else "[图片]")
-                                else:
-                                    msg_images.append("[表情]")
-
-                combined = " ".join(body_texts)
-                if msg_images:
-                    combined = (combined + " " + " ".join(msg_images)).strip() if combined else " ".join(msg_images)
-
-                if combined:
-                    all_items.append({"sender": sender, "text": combined, "_y": av_top, "_type": "text"})
-                    _dbg(f"Group Msg [{sender}]: '{combined[:60]}' y={av_top}-{msg_bottom}")
+            all_avs = sorted(avs, key=lambda a: a["y"])
+            if items and (not all_avs or items[0]["y"] < all_avs[0]["y"] - 15):
+                is_me_v = items[0]["x"] > (mid_x + 50)
+                all_avs.insert(0, {"x": (xmax-50) if is_me_v else (xmin+5), "y": ymin, "w":40, "h":40, "is_me":is_me_v, "virtual":True})
+            for i, av in enumerate(all_avs):
+                atop, al, is_me, is_v = av["y"], av["x"], av.get("is_me", False), av.get("virtual", False)
+                abottom = all_avs[i+1]["y"] if i+1 < len(all_avs) else ymax + 100
+                m_txts = []
+                for it in items:
+                    if (is_me and xmin-20 < it["x"] < al+15) or (not is_me and al+av["w"]-15 < it["x"] < xmax+20):
+                        if atop-15 < it["y"] < abottom: m_txts.append(it)
+                if not m_txts and not any(atop-15 < v["y"] < abottom for v in vis): continue
+                m_txts.sort(key=lambda x: x["y"])
+                qs = [qb for qb in qbs if atop-15 < qb["y"] < abottom]
+                q_sum, final_txts = "", m_txts
+                if qs and m_txts:
+                    qp, rem = [], []
+                    for it in m_txts:
+                        if any(q["x"]-10 < it["x"] < q["x"]+q["w"]+10 and q["y"]-10 < it["y"] < q["y"]+q["h"]+10 for q in qs): qp.append(it["text"])
+                        else: rem.append(it)
+                    if qp: q_sum, final_txts = f"[引用: {' '.join(qp)}]", rem
+                if is_me: sender, start = "me", 0
+                else: sender = "them" if is_v else (final_txts[0]["text"] if final_txts else "them"); start = 0 if is_v else 1
+                body = [q_sum] if q_sum else []
+                for it in final_txts[start:]: body.append(it["text"])
+                m_vis = [("[图片]" if v["type"]=="image" else "[表情]") for v in vis if atop-15 < v["y"] < abottom]
+                txt = " ".join(body + m_vis)
+                if txt: all_msgs.append({"sender": sender, "text": txt, "_y": atop})
         else:
-            # ── 1:1 聊天 ────────────────────────────────────────
-            # 对方消息在左侧，我的消息在右侧
-            for item in items:
-                sender = "me" if item["x"] >= midline_x else "them"
-                all_items.append({"sender": sender, "text": item["text"].strip(), "_y": item["y"], "_type": "text"})
+            for it in items: all_msgs.append({"sender": "me" if it["x"] >= mid_x else "them", "text": it["text"], "_y": it["y"]})
+            for v in vis: all_msgs.append({"sender": v["sender"], "text": "[图片]" if v["type"]=="image" else "[表情]", "_y": v["y"]})
+        all_msgs.sort(key=lambda x: x["_y"])
+        res = []
+        for m in all_msgs:
+            if res and res[-1]["sender"] == m["sender"] and abs(m["_y"]-res[-1].get("_y",0)) < 30: res[-1]["text"] += " " + m["text"]; res[-1]["_y"] = m["_y"]
+            else: res.append(m)
+        for m in res: m.pop("_y", None)
+        return res
 
-        # 添加视觉元素
-        for ve in visual_items:
-            if ve["type"] == "image":
-                desc = ve.get("desc", "")
-                label = f"[图片:{desc}]" if desc else "[图片]"
-            else:
-                label = "[表情]"
-            all_items.append({"sender": ve["sender"], "text": label, "_y": ve["y"], "_type": ve["type"]})
-
-        all_items.sort(key=lambda i: i["_y"])
-
-        # 合并相邻同 sender 条目
-        messages = []
-        for item in all_items:
-            text = item["text"]
-            if not text:
-                continue
-            if item["_type"] != "text":
-                messages.append({"sender": item["sender"], "text": text, "_y": item["_y"]})
-                continue
-            if messages and messages[-1]["sender"] == item["sender"] \
-                    and messages[-1].get("_merge", True) \
-                    and abs(item["_y"] - messages[-1]["_y"]) < 25:
-                messages[-1]["text"] += " " + text
-                messages[-1]["_y"] = item["_y"]
-            else:
-                messages.append({"sender": item["sender"], "text": text, "_y": item["_y"], "_merge": True})
-
-        for m in messages:
-            m.pop("_y", None)
-            m.pop("_merge", None)
-
-        return messages
-
-    def _summarize(self, name: str, messages: list[dict], is_group: bool = False) -> str:
-        """
-        将消息列表压缩为极简文本摘要。
-        群聊显示实际发言人昵称，1:1 聊天将 them 替换为对方名字。
-        """
+    def _summarize(self, name, messages, is_group=False):
         if not is_group:
             for m in messages:
-                if m["sender"] == "them":
-                    m["sender"] = name
-        recent = messages[-15:]  # 群聊需要更多上下文
-        lines = [f"[OK] {name} ({len(recent)} msgs):"]
-        for m in recent:
-            # 将换行符替换为空格，确保摘要中每条消息占一行
+                if m["sender"] == "them": m["sender"] = name
+        res = [f"[OK] {name} ({len(messages)} msgs):"]
+        for m in messages[-15:]:
             txt = m["text"].replace("\n", " ").strip()
-            if len(txt) > 120:  # 稍微增加摘要长度限制
-                txt = txt[:117] + "..."
-            lines.append(f"  {m['sender']}: {txt}")
-        return "\n".join(lines)
+            res.append(f"  {m['sender']}: {txt[:120]}")
+        return "\n".join(res)
 
-    # ── 私有：输入框和发送 ────────────────────────────────────────────────────
-
-    def _click_input_box(self, rect: tuple) -> bool:
-        """
-        定位并点击输入框（使用焦点安全方法）。
-        点击窗口右下角往内缩 25px 的位置。
-        """
-        wx, wy, ww, wh = rect
-        # 点击窗口右边界往内缩 25px，底边界往内缩 25px
-        input_x = wx + ww - 25
-        input_y = wy + wh - 25
-        _dbg(f"click_input_box: clicking ({input_x}, {input_y})")
-        self._focused_click(input_x, input_y)
-        time.sleep(0.1)
-        _dbg_screenshot("after_click_input_box")
-        return True
-
-    def _cgevent_type_chars(self, text: str):
-        """通过 CGEvent 逐字符注入 Unicode 键盘事件，绕过剪贴板。"""
-        for char in text:
-            # Emoji 等 supplementary plane 字符在 UTF-16 中需要 surrogate pair
-            utf16_len = len(char.encode('utf-16-le')) // 2
-            event_down = CGEventCreateKeyboardEvent(None, 0, True)
-            CGEventKeyboardSetUnicodeString(event_down, utf16_len, char)
-            CGEventPost(kCGHIDEventTap, event_down)
-            event_up = CGEventCreateKeyboardEvent(None, 0, False)
-            CGEventKeyboardSetUnicodeString(event_up, utf16_len, char)
-            CGEventPost(kCGHIDEventTap, event_up)
-            time.sleep(random.uniform(0.03, 0.12))
-
-    def _type_and_send(self, message: str, send: bool = True) -> bool:
-        """
-        通过 CGEvent Unicode 键盘事件逐字输入消息。
-        将消息随机分块，配合人类节奏延迟，模拟真人打字行为。
-        send=False 时只输入不按回车。
-        """
-        _dbg(f"type_and_send: '{message}' (send={send})")
-        _dbg_screenshot("before_type_and_send")
-
+    def _activate_and_get_rect(self):
         self._activate_wechat()
+        script = 'tell application "System Events" to tell process "WeChat" to tell window "微信"\nset p to position\nset s to size\nreturn (item 1 of p as string) & "," & (item 2 of p as string) & "," & (item 1 of s as string) & "," & (item 2 of s as string)\nend tell'
+        try:
+            res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True).stdout.strip()
+            p = [int(v) for v in res.split(",")]
+            self._window_rect_cache = tuple(p)
+            return self._window_rect_cache
+        except: return (0, 33, 800, 600)
 
-        # 将消息随机分成 1-4 字符的小块，模拟人类输入节奏
-        i = 0
-        while i < len(message):
-            chunk_size = random.randint(1, 4)
-            chunk = message[i:i + chunk_size]
-            self._cgevent_type_chars(chunk)
-            # 块间停顿：模拟思考/看屏幕
-            time.sleep(random.uniform(0.05, 0.25))
-            i += chunk_size
-
-        if send:
-            _dbg("Typed, pressing Enter")
-            time.sleep(random.uniform(0.1, 0.25))
-            press_key("enter")
-            time.sleep(0.15)
-        else:
-            _dbg("Typed, NOT sending (--no-send)")
-        _dbg_screenshot("after_type_and_send")
-        return True
-
-    def _verify_sent(self, message: str, rect: tuple, prefix: str = "") -> bool:
-        """
-        验证消息是否发送成功。
-        用 accurate 模式搜索回复前缀中的关键词，检查内容区和聊天列表预览。
-        """
-        # 从前缀中提取 2+ 字符的中文/英文词作为搜索关键词
-        prefix_keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{2,}', prefix)
-        search_kw = prefix_keywords[0] if prefix_keywords else message[:4]
-        _dbg(f"verify_sent: searching for '{search_kw}' (from prefix='{prefix}')")
-        _dbg_screenshot("verify_sent")
-        wx, wy, ww, wh = rect
-        lx_min = self._chatlist_x_range(rect)[0]
-        wx_max = wx + ww
-        all_results = self._focused_find_text(search_kw, mode="accurate")
-        # 必须在 WeChat 窗口范围内
-        wechat_matches = [r for r in all_results
-                          if lx_min < r["x"] < wx_max and wy < r["y"] < wy + wh]
-        _dbg(f"verify_sent: '分身' matches in WeChat window: {len(wechat_matches)}")
-        for m in wechat_matches:
-            _dbg(f"  x={m['x']} y={m['y']} '{m['text']}'")
-        if wechat_matches:
-            return True
-        keyword = message[:4] if len(message) >= 4 else message
-        _dbg(f"verify_sent: fallback search '{keyword}'")
-        all_results2 = self._focused_find_text(keyword, mode="accurate")
-        wechat_matches2 = [r for r in all_results2
-                           if lx_min < r["x"] < wx_max and wy < r["y"] < wy + wh]
-        _dbg(f"verify_sent: fallback matches: {len(wechat_matches2)}")
-        return len(wechat_matches2) > 0
-
-    # ── 公开方法 ──────────────────────────────────────────────────────────────
-
-    def chat_list(self) -> str:
-        """
-        列出聊天列表中可见的聊天名称。
-        输出: [OK] N chats: 名1 | 名2 | ...
-        """
-        _init_debug("chat_list", {})
-        if not self._activate_wechat():
-            return "[ERR] 无法激活 WeChat"
-
-        rect = self._get_window_rect()
-        if not rect:
-            return "[ERR] 找不到 WeChat 主窗口，请确认 WeChat 已打开"
-
-        # 激活 WeChat + 全屏 OCR，筛选聊天列表区域内的文字
-        wx, wy, ww, wh = rect
-        list_x_min, list_x_max = self._chatlist_x_range(rect)
-        all_items = self._focused_screen_text(mode="accurate")
-        # 聊天列表项从 wy+60 开始（搜索栏在 wy~wy+60），底部留 80px 给 UI 按钮
-        items = [i for i in all_items
-                 if list_x_min < i["x"] < list_x_max
-                 and wy + 60 < i["y"] < wy + wh - 80]
-
-        # 过滤：只取高置信度、非噪音的短文本（聊天名称通常 2-20 字）
-        names = []
-        seen = set()
-        for item in sorted(items, key=lambda i: i["y"]):
-            txt = item["text"].strip()
-            if self._is_noise(txt):
-                continue
-            if len(txt) < 2 or len(txt) > 30:
-                continue
-            if item["confidence"] < 0.5:
-                continue
-            if txt in seen:
-                continue
-            # 排除明显是消息预览的长文本
-            if any(c in txt for c in ["：", ":", "...", "【"]):
-                continue
-            seen.add(txt)
-            names.append(txt)
-
-        if not names:
-            return "[ERR] 未能识别到聊天列表，WeChat 可能未正常显示"
-
-        preview = " | ".join(names[:12])
-        return f"[OK] {len(names)} chats: {preview}"
-
-    def _scroll_content_area(self, rect: tuple, direction: str = "up", pages: int = 1):
-        """在内容区域滚动指定页数，用于加载更多历史消息。
-
-        滚动距离 = 内容区高度 * 0.65（缩小比例，避免漏读）
-        内容区高度 = 窗口高度 - 标题栏(40px) - 输入框区(80px)
-
-        注意：微信有单次滚动上限，逐页滚动比一次滚动多页更可靠。
-        """
-        wx, wy, ww, wh = rect
-        cx_min = self._content_x_min(rect)
-        scroll_x = cx_min + (wx + ww - cx_min) // 2
-        scroll_y = wy + wh // 2
-
-        # 内容区高度：窗口高度 - 标题栏 - 输入框区
-        content_h = wh - 40 - 80
-        # 每次滚动一页：内容区的55%，确保有重叠不漏读
-        page_distance = int(content_h * 0.55)
-
-        # 逐页滚动，每页后等待足够时间让微信响应
-        for i in range(pages):
-            _dbg(f"Scroll: page {i+1}/{pages}, distance={page_distance}px (content_h={content_h})")
-            _cu.smooth_scroll(scroll_x, scroll_y, direction, distance=page_distance)
-            time.sleep(0.8)  # 每页滚动后等待，让微信有足够时间响应
+    def _scroll_content_area(self, rect, dir="up", pages=1):
+        xmin, xmax = self._content_x_min(rect), rect[0]+rect[2]
+        ymin, ymax = self._detect_content_y_min(rect), self._detect_content_y_max(rect)
+        for _ in range(pages):
+            _cu.smooth_scroll(xmin+(xmax-xmin)//2, ymin+(ymax-ymin)//2, dir, distance=int((ymax-ymin)*0.6))
+            time.sleep(1.0)
 
     def chat_read(self, name: str) -> str:
-        """
-        导航到指定聊天，读取并返回对话摘要。
-        支持群聊：自动检测群聊并识别每条消息的发言人。
-        群聊先读底部（最新消息），再滚动上读历史，两次合并。
-        """
         _init_debug("chat_read", {"name": name})
-        if not self._navigate_to_chat(name):
-            return f'[ERR] 找不到聊天 "{name}"，请检查名称是否正确'
-
+        if not self._navigate_to_chat(name): return f'[ERR] 找不到聊天 "{name}"'
         rect = self._get_window_rect()
-        if not rect:
-            return "[ERR] 获取窗口位置失败"
-
         is_group = self._is_group_chat(rect)
-        _dbg(f"Chat type: {'group' if is_group else '1:1'}")
-
-        if is_group:
-            # 群聊：滚动-截图-OCR循环，每滚一次都获取信息后合并
-            scroll_pages = 3
-            all_messages = []
-
-            # 第一步：在底部（当前位置）OCR
-            _dbg("Group chat: reading bottom (recent messages) first")
-            _dbg_screenshot("group_bottom_before_ocr")
-            ocr_1, path_1 = self._read_content_area(rect)
-            msgs_1 = self._parse_messages(ocr_1, rect, path_1, is_group=True) if ocr_1 else []
-            all_messages.append(msgs_1)
-            _dbg(f"Group read 1/3: {len(msgs_1)} messages")
-
-            # 第二步：滚动1次后立即截图OCR
-            _dbg("Group chat: scroll 1, then OCR")
+        all_messages = []
+        items, path = self._read_content_area(rect)
+        all_messages.append(self._parse_messages(items, rect, path, is_group))
+        for _ in range(2):
             self._scroll_content_area(rect, "up", 1)
-            _dbg_screenshot("group_after_scroll_1")
-            ocr_2, path_2 = self._read_content_area(rect)
-            msgs_2 = self._parse_messages(ocr_2, rect, path_2, is_group=True) if ocr_2 else []
-            all_messages.append(msgs_2)
-            _dbg(f"Group read 2/3: {len(msgs_2)} messages")
+            items, path = self._read_content_area(rect)
+            all_messages.append(self._parse_messages(items, rect, path, is_group))
+        self._scroll_content_area(rect, "down", 2)
+        seen, final = set(), []
+        for msgs in reversed(all_messages):
+            for m in msgs:
+                key = (m["sender"], m["text"].strip())
+                if key not in seen: seen.add(key); final.append(m)
+        return self._summarize(name, final, is_group)
 
-            # 第三步：再滚动1次后立即截图OCR
-            _dbg("Group chat: scroll 2, then OCR")
-            self._scroll_content_area(rect, "up", 1)
-            _dbg_screenshot("group_after_scroll_2")
-            ocr_3, path_3 = self._read_content_area(rect)
-            msgs_3 = self._parse_messages(ocr_3, rect, path_3, is_group=True) if ocr_3 else []
-            all_messages.append(msgs_3)
-            _dbg(f"Group read 3/3: {len(msgs_3)} messages")
-
-            # 滚回底部
-            self._scroll_content_area(rect, "down", scroll_pages)
-            time.sleep(0.2)
-
-            # 合并所有消息，按文本去重
-            # 滚动顺序：all_messages[0]=最新(底部), [1]=滚动1次后, [2]=滚动2次后
-            # 输出顺序要求：最早的在前，最新的在后 → 逆序遍历
-            seen_texts = set()
-            messages = []
-            for msgs in reversed(all_messages):
-                for msg in msgs:
-                    key = msg.get("text", "").strip()
-                    if key and key in seen_texts:
-                        continue
-                    if key:
-                        seen_texts.add(key)
-                    messages.append(msg)
-            _dbg(f"Group merged: {len(messages)} messages")
-        else:
-            # 1:1 聊天
-            ocr_items, screenshot_path = self._read_content_area(rect)
-            messages = self._parse_messages(ocr_items, rect, screenshot_path) if ocr_items else []
-            _dbg(f"Initial read: {len(messages)} messages")
-
-            if len(messages) < 5:
-                scroll_pages = 2 if len(messages) < 2 else 1
-                _dbg(f"Messages insufficient ({len(messages)}), scrolling up {scroll_pages} page(s)")
-                self._scroll_content_area(rect, "up", scroll_pages)
-                _dbg_screenshot("after_scroll_up")
-
-                ocr_items_more, screenshot_path_more = self._read_content_area(rect)
-                if ocr_items_more:
-                    messages_more = self._parse_messages(ocr_items_more, rect, screenshot_path_more)
-                    # 合并滚动前后的消息，去重
-                    seen_texts = set(msg.get("text", "").strip() for msg in messages if msg.get("text"))
-                    merged = list(messages)
-                    for msg in messages_more:
-                        key = msg.get("text", "").strip()
-                        if key and key not in seen_texts:
-                            seen_texts.add(key)
-                            merged.append(msg)
-                    messages = merged
-                    _dbg(f"After scroll: {len(messages)} messages (merged + deduped)")
-
-                self._scroll_content_area(rect, "down", scroll_pages)
-                time.sleep(0.2)
-
-        if not messages:
-            return f"[OK] {name} (0 msgs): 无可读取的文字内容（可能全是图片/表情）"
-
-        return self._summarize(name, messages, is_group=is_group)
-
-    def _load_config(self) -> dict:
-        """读取 skill config.json，返回配置字典。"""
-        config_path = SKILL_DIR / "config.json"
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-    def chat_reply(self, name: str, message: str, no_send: bool = False) -> str:
-        """
-        向指定聊天发送回复（自动添加 REPLY_PREFIX）。
-        发送行为由 config.json 的 auto_send 决定：
-          - auto_send: true  → 自动发送
-          - auto_send: false → 只输入到输入框，不按回车（默认）
-        CLI --no-send 参数可强制覆盖为不发送。
-        输出: [OK] Sent/Typed to <name>: <full_message>
-        """
-        config = self._load_config()
-        auto_send = config.get("auto_send", False)
-        reply_prefix = config.get("reply_prefix", REPLY_PREFIX_DEFAULT)
-        # --no-send CLI 参数优先级最高
-        should_send = False if no_send else auto_send
-
-        _init_debug("chat_reply", {"name": name, "message": message, "no_send": no_send, "auto_send": auto_send, "should_send": should_send})
-        full_message = reply_prefix + message
-
-        if not self._navigate_to_chat(name):
-            return f'[ERR] 找不到聊天 "{name}"'
-
+    def chat_reply(self, name, message, no_send=False):
+        _init_debug("chat_reply", {"name":name})
+        if not self._navigate_to_chat(name): return f'[ERR] 找不到聊天 "{name}"'
         rect = self._get_window_rect()
-        if not rect:
-            return "[ERR] 获取窗口位置失败"
-
-        # 必须先点击输入框确保光标在正确位置，再粘贴发送
-        if not self._click_input_box(rect):
-            return "[ERR] 无法定位消息输入框"
-
-        if not self._type_and_send(full_message, send=should_send):
-            return "[ERR] 输入失败"
-
-        if not should_send:
-            return f"[OK] Typed to {name} (未发送，请在微信中确认后手动按回车): {full_message}"
-
-        # 验证：检查消息是否出现在对话内容区 或 聊天列表预览中
-        time.sleep(0.3)
-        if self._verify_sent(message, rect, prefix=reply_prefix):
-            return f"[OK] Sent to {name}: {full_message}"
-        else:
-            return f"[ERR] 消息可能未发送成功（未在对话中检测到），请手动检查"
-
-
-# ── 未来扩展占位 ──────────────────────────────────────────────────────────────
-
-class MomentsController:
-    """朋友圈操作（未实现）"""
-    def comment(self, content: str) -> str:
-        return "[ERR] moments comment 尚未实现"
-
-
-class ContactsController:
-    """联系人操作（未实现）"""
-    def tag(self, name: str, tag: str) -> str:
-        return "[ERR] contacts tag 尚未实现"
-
-    def approve(self) -> str:
-        return "[ERR] contacts approve 尚未实现"
-
-    def add(self, id_or_phone: str) -> str:
-        return "[ERR] contacts add 尚未实现"
-
-
-# ── CLI 入口 ──────────────────────────────────────────────────────────────────
+        ymin, ymax = self._detect_content_y_min(rect), self._detect_content_y_max(rect)
+        self._focused_click(rect[0]+rect[2]-25, rect[1]+rect[3]-25)
+        prefix = REPLY_PREFIX_DEFAULT
+        full = prefix + message
+        self._activate_wechat()
+        _cu.type_text(full)
+        if not no_send: _cu.press_key("enter")
+        return f"[OK] Sent to {name}: {full}"
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="WeChat 自动化 CLI",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  python3 wechat.py chat list
-  python3 wechat.py chat read Kent
-  python3 wechat.py chat reply Kent "好的，明天见！"
-        """
-    )
-    sub = parser.add_subparsers(dest="group", metavar="<group>")
-    sub.required = True
-
-    # ── chat ──────────────────────────────────────────────────────────────────
-    chat_p = sub.add_parser("chat", help="聊天操作")
-    chat_sub = chat_p.add_subparsers(dest="action", metavar="<action>")
-    chat_sub.required = True
-
-    chat_sub.add_parser("list", help="列出可见聊天")
-
-    p_read = chat_sub.add_parser("read", help="读取聊天内容")
-    p_read.add_argument("name", help="联系人或群组名称")
-
-    p_reply = chat_sub.add_parser("reply", help="回复聊天")
-    p_reply.add_argument("name", help="联系人或群组名称")
-    p_reply.add_argument("message", help="回复内容（不含前缀，前缀自动添加）")
-    p_reply.add_argument("--no-send", action="store_true", help="只输入到输入框，不按回车发送")
-
-    # ── moments（占位） ───────────────────────────────────────────────────────
-    moments_p = sub.add_parser("moments", help="朋友圈操作（未实现）")
-    moments_sub = moments_p.add_subparsers(dest="action", metavar="<action>")
-    moments_sub.required = True
-    p_comment = moments_sub.add_parser("comment", help="评论朋友圈")
-    p_comment.add_argument("content")
-
-    # ── contacts（占位） ──────────────────────────────────────────────────────
-    contacts_p = sub.add_parser("contacts", help="联系人操作（未实现）")
-    contacts_sub = contacts_p.add_subparsers(dest="action", metavar="<action>")
-    contacts_sub.required = True
-    p_tag = contacts_sub.add_parser("tag", help="添加标签")
-    p_tag.add_argument("name")
-    p_tag.add_argument("tag")
-    contacts_sub.add_parser("approve", help="通过好友申请")
-    p_add = contacts_sub.add_parser("add", help="添加好友")
-    p_add.add_argument("id_or_phone")
-
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="group")
+    chat = sub.add_parser("chat")
+    chat_sub = chat.add_subparsers(dest="action")
+    chat_sub.add_parser("list")
+    p_read = chat_sub.add_parser("read"); p_read.add_argument("name")
+    p_reply = chat_sub.add_parser("reply"); p_reply.add_argument("name"); p_reply.add_argument("message"); p_reply.add_argument("--no-send", action="store_true")
     args = parser.parse_args()
-
-    # read/reply 需要控制鼠标键盘，必须互斥执行
-    needs_lock = args.group == "chat" and args.action in ("read", "reply")
-    lock_fd = None
-
-    if needs_lock:
-        lock_fd = open(LOCK_FILE, "w")
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("[ERR] 另一个 wechat.py 实例正在操作中，请等待完成后重试")
-            lock_fd.close()
-            sys.exit(1)
-
-    try:
-        if args.group == "chat":
-            ctrl = WeChatController()
-            if args.action == "list":
-                print(ctrl.chat_list())
-            elif args.action == "read":
-                print(ctrl.chat_read(args.name))
-            elif args.action == "reply":
-                print(ctrl.chat_reply(args.name, args.message, no_send=args.no_send))
-
-        elif args.group == "moments":
-            ctrl = MomentsController()
-            if args.action == "comment":
-                print(ctrl.comment(args.content))
-
-        elif args.group == "contacts":
-            ctrl = ContactsController()
-            if args.action == "tag":
-                print(ctrl.tag(args.name, args.tag))
-            elif args.action == "approve":
-                print(ctrl.approve())
-            elif args.action == "add":
-                print(ctrl.add(args.id_or_phone))
-
-    except KeyboardInterrupt:
-        print("\n[ERR] 被用户中断")
-        sys.exit(1)
-    except Exception as e:
-        print(f"[ERR] 未预期错误: {e}")
-        sys.exit(1)
-    finally:
-        if lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            lock_fd.close()
-
+    ctrl = WeChatController()
+    if args.group == "chat":
+        if args.action == "list": print(ctrl.chat_list())
+        elif args.action == "read": print(ctrl.chat_read(args.name))
+        elif args.action == "reply": print(ctrl.chat_reply(args.name, args.message, no_send=args.no_send))
 
 if __name__ == "__main__":
     main()

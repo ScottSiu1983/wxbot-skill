@@ -78,41 +78,22 @@ def scroll(x: int, y: int, direction: str, clicks: int = 3):
 
 def smooth_scroll(x: int, y: int, direction: str, distance: int = 200):
     """
-    平滑滚动，模拟真实触摸板行为。
-    使用 CGEvent 像素级滚动，避免被检测为机器人。
-
-    Args:
-        x, y: 滚动位置
-        direction: "up" 或 "down"
-        distance: 滚动像素数（屏幕高度相关）
+    滚动聊天区域。
+    修复闪屏：只使用 moveTo 悬停，不进行 click 点击，使用 pyautogui.scroll 进行滚动。
     """
     pyautogui.moveTo(x, y)
+    time.sleep(0.1)
 
-    # 计算滚动方向（正值向上滚动，负值向下滚动）
-    delta = distance if direction == "up" else -distance
-
-    # 分解为多个小滚动事件（5-10 步）
-    steps = random.randint(5, 10)
-    per_step = delta // steps
-
-    for i in range(steps):
-        # 添加随机抖动模拟真实手势
-        jitter = random.randint(-2, 2)
-        scroll_delta = per_step + jitter
-
-        # 创建像素级滚动事件
-        event = CGEventCreateScrollWheelEvent(
-            None,           # event source
-            kCGScrollEventUnitPixel,  # 像素单位
-            1,              # wheel count (1 = 垂直滚动)
-            scroll_delta    # 滚动量（像素）
-        )
-        CGEventPost(kCGHIDEventTap, event)
-
-        # 随机延迟
-        time.sleep(random.uniform(0.01, 0.05))
-
-    print(f"平滑滚动 ({x}, {y}) {direction} {distance}px")
+    # pyautogui.scroll(clicks): 正数向上滚（看旧消息），负数向下滚（看新消息）
+    clicks = 15 if direction == "up" else -15
+    
+    try:
+        pyautogui.scroll(clicks, x=x, y=y)
+        # 等待 UI 刷新
+        time.sleep(1.0)
+        print(f"滚动 ({x}, {y}) {direction} {clicks}步")
+    except Exception as e:
+        print(f"滚动失败: {e}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
