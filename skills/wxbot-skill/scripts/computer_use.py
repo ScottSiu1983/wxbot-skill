@@ -45,19 +45,33 @@ def click(x: int, y: int, double: bool = False, right: bool = False):
 
 
 def type_text(text: str):
-    """输入文字。中文/特殊字符通过剪贴板粘贴，ASCII 直接输入。"""
-    has_non_ascii = any(ord(c) > 127 for c in text)
-    if has_non_ascii:
-        # 剪贴板粘贴（支持中文）
-        proc = subprocess.run(
-            ["pbcopy"], input=text.encode("utf-8"), check=True
-        )
-        pyautogui.hotkey("command", "v")
-        print(f"粘贴文字: {text!r}")
-    else:
-        pyautogui.typewrite(text, interval=0.04)
-        print(f"输入文字: {text!r}")
-    time.sleep(0.1)
+    """
+    拟人化输入文字。
+    通过 macOS 底层 CGEvent 模拟真实按键，支持中文，且带有随机击键延迟以规避机器人检测。
+    """
+    from Quartz import (
+        CGEventCreateKeyboardEvent,
+        CGEventKeyboardSetUnicodeString,
+        CGEventPost,
+        kCGHIDEventTap
+    )
+    
+    print(f"拟人化键入: {text!r}")
+    
+    for char in text:
+        # 创建一个空键位的键盘事件
+        # 128 是一个不存在的虚拟键位，我们主要通过 UnicodeString 注入内容
+        event = CGEventCreateKeyboardEvent(None, 0, True)
+        # 将字符注入事件
+        CGEventKeyboardSetUnicodeString(event, len(char), char)
+        # 投递按键按下事件
+        CGEventPost(kCGHIDEventTap, event)
+        
+        # 模拟真实的打字节奏 (0.05s - 0.2s 的随机停顿)
+        time.sleep(random.uniform(0.05, 0.15))
+        
+    time.sleep(0.3) # 完成后稍作停顿以稳固输入状态
+
 
 
 def press_key(key: str):
