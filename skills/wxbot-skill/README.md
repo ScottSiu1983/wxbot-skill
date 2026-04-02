@@ -1,6 +1,6 @@
 # WeChat Desktop Automation Skill
 
-A Claude Code skill that automates WeChat desktop (macOS) through local OCR and keyboard/mouse simulation. All text recognition runs on-device via Apple Vision Framework — no data leaves your machine.
+A Gemini CLI skill that automates WeChat desktop (macOS) through local OCR and keyboard/mouse simulation. All text recognition runs on-device via Apple Vision Framework — no data leaves your machine.
 
 ## Features
 
@@ -34,7 +34,7 @@ Grant these in **System Settings > Privacy & Security**:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   Claude Code                        │
+│                   Gemini CLI                        │
 │              (interprets user intent)                │
 ├─────────────────────────────────────────────────────┤
 │                  SKILL.md                            │
@@ -69,10 +69,10 @@ Grant these in **System Settings > Privacy & Security**:
 ## Project Structure
 
 ```
-.claude/skills/wxbot-skill/
+skills/wxbot-skill/
 ├── README.md              # This file
 ├── USAGE.md               # Detailed usage guide
-├── SKILL.md               # Claude Code skill definition
+├── SKILL.md               # Gemini CLI skill definition
 ├── scripts/
 │   └── wechat.py          # Main CLI (1377 lines)
 ├── references/
@@ -86,7 +86,7 @@ Grant these in **System Settings > Privacy & Security**:
 All dependencies are self-contained in `scripts/`:
 
 ```
-.claude/skills/wxbot-skill/scripts/
+skills/wxbot-skill/scripts/
 ├── wechat.py              # Main CLI
 ├── local_vision.py        # Vision Framework OCR wrapper
 └── computer_use.py        # pyautogui wrapper

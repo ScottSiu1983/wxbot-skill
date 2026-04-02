@@ -205,58 +205,86 @@ end tell'''
         if self._layout_anchors and self._window_rect_cache == rect: return self._layout_anchors
         wx, wy, ww, wh = rect
         from PIL import Image
-        path = take_screenshot(); self._last_screenshot = path; img = Image.open(path)
+        path = take_screenshot()
+        self._last_screenshot = path
+        img = Image.open(path)
         img_np = np.array(img)
         
+        # 探测 Retina 缩放倍率
+        scale = img_np.shape[1] / SCREEN_W
+        def L2P(v): return int(v * scale)
+        def P2L(v): return int(v / scale)
+
         # 1. 探测纵向泳道分界 (X 轴)
-        scan_y_v = wy + wh // 2
+        # 参考 xray: 在窗口中间选取样本点进行验证
+        scan_y_samples = [L2P(wy + wh // 4), L2P(wy + wh // 2), L2P(wy + wh * 3 // 4)]
         v_line_x = None
-        for x in range(wx + ww // 2, wx + ww - 50):
-            c_curr, c_left = img.getpixel((x, scan_y_v))[:3], img.getpixel((x-1, scan_y_v))[:3]
-            if sum(abs(c1-c2) for c1,c2 in zip(c_curr, c_left)) > 15:
-                # 垂直全贯穿校验 (如 X-Ray 逻辑)
-                pts, total = 0, 0
-                for dy in range(-wh//4, wh//4, 10):
+        for px in range(L2P(wx + ww // 2), L2P(wx + ww - 50)):
+            is_cand = False
+            for sy in scan_y_samples:
+                c_curr, c_left = img_np[sy, px].astype(np.int16), img_np[sy, px-1].astype(np.int16)
+                if np.sum(np.abs(c_curr - c_left)) > 15:
+                    is_cand = True; break
+            if is_cand:
+                # 垂直贯穿校验
+                matches, total = 0, 0
+                for sy_check in range(L2P(wy + 80), L2P(wy + wh - 80), 10):
                     total += 1
-                    try:
-                        if sum(abs(c1-c2) for c1,c2 in zip(img.getpixel((x, scan_y_v+dy))[:3], img.getpixel((x-1, scan_y_v+dy))[:3])) > 10: pts += 1
-                    except: break
-                if pts/total > 0.7: v_line_x = x; break
+                    if np.sum(np.abs(img_np[sy_check, px].astype(np.int16) - img_np[sy_check, px-1].astype(np.int16))) > 10: matches += 1
+                if matches / total > 0.7: v_line_x = P2L(px); break
         if not v_line_x: v_line_x = wx + int(ww * 0.33)
         
-        # 2. 在消息流泳道内探测横向分块 (Y 轴)
-        scan_x_h = v_line_x + (wx+ww-v_line_x)//2
+        # 2. 在消息流泳道内探测横向分界 (Y 轴)
+        p_lx, p_rx = L2P(v_line_x), L2P(wx + ww)
+        scan_x_samples = [int(p_lx + (p_rx - p_lx) * 0.25), int(p_lx + (p_rx - p_lx) * 0.5), int(p_lx + (p_rx - p_lx) * 0.75)]
         h_lines = []
-        for y in range(wy+20, wy+wh-20):
-            c_curr, c_up = img.getpixel((scan_x_h, y))[:3], img.getpixel((scan_x_h, y-1))[:3]
-            if sum(abs(c1-c2) for c1,c2 in zip(c_curr, c_up)) > 15:
-                # 水平全贯穿校验 (确保这根线划开了整个消息泳道)
+        for py in range(L2P(wy + 20), L2P(wy + wh - 20)):
+            is_cand = False
+            for sx in scan_x_samples:
+                c_curr, c_up = img_np[py, sx].astype(np.int16), img_np[py-1, sx].astype(np.int16)
+                if np.sum(np.abs(c_curr - c_up)) > 15:
+                    is_cand = True; break
+            if is_cand:
+                # 水平贯穿校验
                 matches, total = 0, 0
-                for tx in range(v_line_x+5, wx+ww-5, 10):
+                for sx_check in range(p_lx + 5, p_rx - 5, 10):
                     total += 1
-                    # 对比整行像素
-                    try:
-                        if sum(abs(c1-c2) for c1,c2 in zip(img.getpixel((tx,y))[:3], c_curr)) < 25: matches += 1
-                    except: break
-                if matches/total > 0.9:
-                    if not h_lines or y-h_lines[-1] > 5: h_lines.append(y)
+                    if np.sum(np.abs(img_np[py, sx_check].astype(np.int16) - img_np[py-1, sx_check].astype(np.int16))) > 10: matches += 1
+                if matches / total > 0.85:
+                    ly = P2L(py)
+                    if not h_lines or ly - h_lines[-1] > 5: h_lines.append(ly)
         
-        # 3. 固化命名映射：寻找最大空隙作为消息流 (Message Flow)
-        bounds = [wy+30] + h_lines + [wy+wh-30]
-        max_gap, bt, bb = 0, wy+60, wy+wh-130
-        for i in range(len(bounds)-1):
-            gap = bounds[i+1]-bounds[i]
-            if gap > max_gap: 
-                max_gap = gap; bt, bb = bounds[i], bounds[i+1]
+        # 3. 筛选消息流逻辑：寻找最大的横向间隙作为消息列表
+        # 同时利用颜色特征辅助：消息流通常背景较浅（接近白色），输入区通常有浅灰色背景
+        bounds = [wy] + h_lines + [wy + wh]
+        candidates = []
+        for i in range(len(bounds) - 1):
+            ty, by = bounds[i], bounds[i+1]
+            gap = by - ty
+            if gap > 150: # 消息区域至少有一定高度
+                # 采样块中心颜色以确认是否为消息流（通常比输入区更白）
+                p_my = L2P(ty + gap // 2)
+                p_mx = L2P(wx + ww // 2)
+                if p_my < img_np.shape[0] and p_mx < img_np.shape[1]:
+                    avg_color = np.mean(img_np[p_my-5:p_my+5, p_mx-5:p_mx+5], axis=(0,1))
+                    score = gap * (1 if np.mean(avg_color) > 230 else 0.5) # 偏向白色区域
+                    candidates.append((score, ty, by))
         
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            _, bt, bb = candidates[0]
+        else:
+            bt, bb = wy + 60, wy + wh - 130
+        
+        # 严格锁定 ymax (bb) 到探测到的最后一条划线
         layout = {
             'v_divide_x': v_line_x,
-            'title_bar': (wy, bt),        # 标题栏范围
-            'message_flow': (bt+2, bb-2),   # 消息流对话区范围
-            'input_box': (bb, wy+wh)      # 输入框范围
+            'title_bar': (wy, bt),
+            'message_flow': (bt + 1, bb - 2), # 留出 1-2 像素避免踩线
+            'input_box': (bb, wy + wh)
         }
         self._layout_anchors, self._window_rect_cache = layout, rect
-        _dbg(f"Layout SELECTED: X={v_line_x}, Y={layout['message_flow']}")
+        _dbg(f"Layout ANALYZED: X={v_line_x}, Y={layout['message_flow']}")
         return layout
 
     def _content_x_min(self, rect): return self._detect_absolute_layout(rect)['v_divide_x']
@@ -372,7 +400,8 @@ end tell'''
                     bx, by, bw, bh = _flood(y, x)
                     lx, ly, lw, lh = bx/scale+xmin, by/scale+ymin, bw/scale, bh/scale
                     cx = lx + lw/2
-                    if 25<lw<50 and 25<lh<50 and abs(lw-lh)<10:
+                    # 放宽头像判定范围 (WeChat 桌面版通常在 35-45 逻辑像素之间)
+                    if 30<lw<55 and 30<lh<55 and abs(lw-lh)<10:
                         avatars.append({"x":int(lx),"y":int(ly),"w":int(lw),"h":int(lh),"is_me":cx>(xmin+(xmax-xmin)*0.8)})
                         continue
                     std = np.std(arr[by:by+bh, bx:bx+bw].reshape(-1,3), axis=0).mean()
@@ -405,7 +434,7 @@ end tell'''
                 all_avs.insert(0, {"x": (xmax-50) if is_me_v else (xmin+5), "y": ymin, "w":40, "h":40, "is_me":is_me_v, "virtual":True})
             for i, av in enumerate(all_avs):
                 atop, al, is_me, is_v = av["y"], av["x"], av.get("is_me", False), av.get("virtual", False)
-                abottom = all_avs[i+1]["y"] if i+1 < len(all_avs) else ymax + 100
+                abottom = all_avs[i+1]["y"] if i+1 < len(all_avs) else ymax
                 m_txts = []
                 for it in items:
                     if (is_me and xmin-20 < it["x"] < al+15) or (not is_me and al+av["w"]-15 < it["x"] < xmax+20):

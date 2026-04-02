@@ -215,7 +215,7 @@ r"^\d+$"                      # 未读消息角标
          │
     ┌────┴────┐
     ▼         ▼
-auto_send   no_send
+auto_send   auto_send
  =True      =True
     │         │
     ▼         ▼
@@ -583,8 +583,8 @@ except BlockingIOError:
 ### 10.3 CLI 覆盖
 
 ```bash
-# --no-send 强制不发送（覆盖 auto_send=true）
-python3 wechat.py chat reply Kent "测试" --no-send
+# --auto-send 强制不发送（覆盖 auto_send=true）
+python3 wechat.py chat reply Kent "测试" --auto-send
 ```
 
 ---

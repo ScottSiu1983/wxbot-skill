@@ -3,6 +3,8 @@ __pycache__/
 .DS_Store
 .claude/skills/wxbot-skill/debug/
 .claude/skills/wxbot-skill/.wechat_ui.lock
+skills/wxbot-skill/debug/
+skills/wxbot-skill/.wechat_ui.lock
 .claude/settings.local.json
 /config.json
 /tmp/

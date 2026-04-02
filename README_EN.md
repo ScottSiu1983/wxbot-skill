@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">wxbot-skill</h1>
   <p align="center">
-    A <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> skill for WeChat desktop automation
+    A <a href="Gemini CLI">Gemini CLI</a> skill for WeChat desktop automation
     <br />
     Local OCR + keyboard/mouse simulation · Your data never leaves your machine
   </p>
@@ -24,7 +24,7 @@
 - **Chat Reply** — Send contextual replies with automatic prefix tagging
 - **Group Chat Support** — Detects groups, identifies per-message senders by visual layout
 - **Visual Detection** — Classifies images, stickers, and emoji in conversations
-- **Haiku-Friendly** — Optimized SKILL.md instructions for cost-efficient operation with Claude Haiku
+- **Haiku-Friendly** — Optimized SKILL.md instructions for cost-efficient operation with Gemini
 
 ## Requirements
 
@@ -33,7 +33,7 @@
 | macOS | 13+ (Vision Framework, AppleScript) |
 | Python | 3.10+ |
 | WeChat | Mac desktop app |
-| Claude Code | [CLI](https://docs.anthropic.com/en/docs/claude-code) |
+| Gemini CLI | [CLI](Gemini CLI) |
 
 ### macOS Permissions
 
@@ -69,7 +69,7 @@ Create `.claude/settings.local.json` (not tracked by git):
 
 ### 3. Customize (optional)
 
-Edit `.claude/skills/wxbot-skill/config.json`:
+Edit `skills/wxbot-skill/config.json`:
 
 ```json
 {
@@ -100,7 +100,7 @@ Then say:
 ## How It Works
 
 ```
-Claude Code  ─→  SKILL.md (trigger + workflow rules)
+Gemini CLI  ─→  SKILL.md (trigger + workflow rules)
                     │
                     ▼
                wechat.py CLI

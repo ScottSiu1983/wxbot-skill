@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">wxbot-skill</h1>
   <p align="center">
-    基于 <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> 的微信桌面自动化技能
+    基于 <a href="https://gemini.google.com/">Gemini</a> 的微信桌面自动化技能
     <br />
     本地 OCR + 键鼠模拟 · 数据不离开你的电脑
   </p>
@@ -24,7 +24,7 @@
 - **聊天回复** — 发送带前缀标识的智能回复
 - **群聊支持** — 自动识别群聊，支持提取回复引用（Quote Detection），并区分每条消息的发送者
 - **视觉识别** — 识别对话中的图片、表情包和 emoji
-- **Haiku 适配** — 优化 SKILL.md 指令，支持 Claude Haiku 低成本运行
+- **低成本适配** — 优化 SKILL.md 指令，支持极速低成本运行
 
 ## 环境要求
 
@@ -33,7 +33,7 @@
 | macOS | 13+（Vision Framework、AppleScript） |
 | Python | 3.10+ |
 | WeChat | Mac 桌面版 |
-| Claude Code | [CLI](https://docs.anthropic.com/en/docs/claude-code) |
+| Gemini CLI | Antigravity |
 
 ### macOS 权限
 
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 
 ### 2. 配置权限
 
-创建 `.claude/settings.local.json`（不会被 git 追踪）：
+配置 Gemini CLI 授权（不会被 git 追踪）：
 
 ```json
 {
@@ -69,7 +69,7 @@ pip install -r requirements.txt
 
 ### 3. 自定义配置（可选）
 
-编辑 `.claude/skills/wxbot-skill/config.json`：
+编辑 `skills/wxbot-skill/config.json`：
 
 ```json
 {
@@ -86,10 +86,10 @@ pip install -r requirements.txt
 ### 4. 运行
 
 ```bash
-claude  # 或: claude --model haiku
+gemini
 ```
 
-然后对 Claude 说：
+然后对 Gemini 说：
 
 ```
 列出微信聊天
@@ -100,7 +100,7 @@ claude  # 或: claude --model haiku
 ## 工作原理
 
 ```
-Claude Code  ─→  SKILL.md（触发规则 + 工作流）
+Gemini CLI  ─→  SKILL.md（触发规则 + 工作流）
                     │
                     ▼
                wechat.py CLI

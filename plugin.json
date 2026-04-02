@@ -1,0 +1,5 @@
+{
+  "name": "wxbot-skill",
+  "version": "1.0.0",
+  "description": "基于 Gemini 的微信桌面自动化技能，本地 OCR + 键鼠模拟保护隐私"
+}

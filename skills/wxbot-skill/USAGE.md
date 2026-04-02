@@ -5,7 +5,7 @@
 All commands use the same entry point:
 
 ```bash
-python3 .claude/skills/wxbot-skill/scripts/wechat.py <module> <command> [args]
+python3 skills/wxbot-skill/scripts/wechat.py <module> <command> [args]
 ```
 
 ## Commands
@@ -15,7 +15,7 @@ python3 .claude/skills/wxbot-skill/scripts/wechat.py <module> <command> [args]
 List all visible chats in the WeChat sidebar.
 
 ```bash
-python3 .claude/skills/wxbot-skill/scripts/wechat.py chat list
+python3 skills/wxbot-skill/scripts/wechat.py chat list
 ```
 
 **Output:**
@@ -33,7 +33,7 @@ python3 .claude/skills/wxbot-skill/scripts/wechat.py chat list
 Navigate to a chat and read recent messages.
 
 ```bash
-python3 .claude/skills/wxbot-skill/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
+python3 skills/wxbot-skill/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
 ```
 
 **Output:**
@@ -67,7 +67,7 @@ python3 .claude/skills/wxbot-skill/scripts/wechat.py chat read "Kent" > /tmp/wec
 Send a reply to a specific chat.
 
 ```bash
-python3 .claude/skills/wxbot-skill/scripts/wechat.py chat reply "Kent" "好的，几点出发？" > /tmp/wechat_output.txt 2>&1
+python3 skills/wxbot-skill/scripts/wechat.py chat reply "Kent" "好的，几点出发？" > /tmp/wechat_output.txt 2>&1
 ```
 
 **Output:**
@@ -88,17 +88,17 @@ python3 .claude/skills/wxbot-skill/scripts/wechat.py chat reply "Kent" "好的�
 ### Foreground (chat list only)
 
 ```bash
-python3 .claude/skills/wxbot-skill/scripts/wechat.py chat list
+python3 skills/wxbot-skill/scripts/wechat.py chat list
 ```
 
 ### Background (chat read / chat reply)
 
-These commands control the mouse and keyboard. Running them in the foreground will interfere with the Claude Code terminal.
+These commands control the mouse and keyboard. Running them in the foreground will interfere with the Gemini CLI terminal.
 
 **Pattern:**
 ```bash
 # Step 1: Run in background, redirect output
-python3 .claude/skills/wxbot-skill/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
+python3 skills/wxbot-skill/scripts/wechat.py chat read "Kent" > /tmp/wechat_output.txt 2>&1
 # (use run_in_background: true in Bash tool)
 
 # Step 2: After completion, read the result
@@ -125,7 +125,7 @@ Each `read` / `reply` changes the WeChat window state. Batching reads will cause
 | Rule | Description |
 |------|-------------|
 | Read first | Always `chat read` before `chat reply` — never reply blind |
-| Prefix auto-added | Script prepends `[Scott的AI分身] ` — Claude should not include it |
+| Prefix auto-added | Script prepends `[Scott的AI分身] ` — Gemini should not include it |
 | Conservative | Keep replies short, polite; don't make commitments or disclose private info |
 | Emoji OK | Use emoji sparingly for natural tone (e.g., 👍😄🤝); no WeChat stickers |
 | When uncertain | Output `[需要确认]: 请问您希望如何回复 <name>？` and let the user decide |
