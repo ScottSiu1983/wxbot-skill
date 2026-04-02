@@ -1,11 +1,22 @@
 __pycache__/
 *.pyc
 .DS_Store
-.claude/skills/wxbot-skill/debug/
-.claude/skills/wxbot-skill/.wechat_ui.lock
+
+# 各平台生成的技能安装目录（由 scaffold.py 生成，不纳入版本控制）
+.gemini/skills/wxbot-skill/
+.claude/skills/wxbot-skill/
+.agents/skills/wxbot-skill/
+.openclaw/skills/wxbot-skill/
+.cursor/rules/wxbot.mdc
+
+# 调试和锁文件
 skills/wxbot-skill/debug/
 skills/wxbot-skill/.wechat_ui.lock
-.claude/settings.local.json
+
+# 运行时配置（用户本地）
 /config.json
+.claude/settings.local.json
+
+# 临时文件
 /tmp/
 *.log

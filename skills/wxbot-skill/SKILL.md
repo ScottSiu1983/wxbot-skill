@@ -1,8 +1,6 @@
 ---
 name: wxbot-skill
 description: "当用户提到微信、WeChat、回复消息、查看聊天、发消息给某人、群聊、回复群、给某个群回复、操作联系人、或任何涉及聊天消息自动化的任务时使用此技能。触发关键词包括但不限于：微信、群、群聊、聊天、回复、发送、消息、WeChat。即使用户没有明确说'微信'二字，只要涉及给人或群发消息、回复消息，都应触发此技能。"
-argument-hint: chat list | chat read <name> | chat reply <name> "<msg>"
-allowed-tools: [Bash, Read]
 ---
 
 # WeChat 自动化技能
@@ -45,35 +43,34 @@ python3 skills/wxbot-skill/scripts/wechat.py chat reply <name> "<message>"
 
 ## 执行模式（重要）
 
-**`chat read` 和 `chat reply` 必须用 Bash 工具的 `run_in_background: true` 参数运行**，因为脚本通过 pyautogui 控制键盘鼠标，前台运行时会干扰终端。
+**`chat read` 和 `chat reply` 必须在后台运行**，因为脚本通过 pyautogui 控制键盘鼠标，前台运行时会干扰终端。
 
 **严禁使用 shell `&` 后台**（如 `cmd &`）——这会导致无法跟踪进程状态，容易因为误判"没输出"而重复执行，造成文字被输入两次。**每条命令只执行一次，绝不重试。**
 
 ```bash
 # chat list 较快（~2s），可以前台运行
-python3 skills/wxbot-skill/scripts/wechat.py chat list
+python3 scripts/wechat.py chat list
 
-# chat read 和 chat reply：用 run_in_background: true，不需要重定向
-# run_in_background 会自动捕获输出，完成后直接显示结果
-python3 skills/wxbot-skill/scripts/wechat.py chat read Kent
-python3 skills/wxbot-skill/scripts/wechat.py chat reply Kent "内容"
+# chat read 和 chat reply：在后台运行
+python3 scripts/wechat.py chat read Kent
+python3 scripts/wechat.py chat reply Kent "内容"
 ```
 
 ## 标准工作流（回复某人）
 
 当用户说「回复 Kent」「给情怀新群回复」「按上下文回复」等，**不要反问用户要回复什么**，而是：
 
-### Step 1: 读取上下文（后台运行，run_in_background: true）
+### Step 1: 读取上下文（后台运行）
 ```bash
-python3 skills/wxbot-skill/scripts/wechat.py chat read Kent
+python3 scripts/wechat.py chat read Kent
 ```
 等待后台任务完成，输出会自动返回。
 
 ### Step 2: 根据聊天上下文，自行分析并拟写回复内容
 
-### Step 3: 发送回复（后台运行，run_in_background: true）
+### Step 3: 发送回复（后台运行）
 ```bash
-python3 skills/wxbot-skill/scripts/wechat.py chat reply Kent "拟写的回复内容"
+python3 scripts/wechat.py chat reply Kent "拟写的回复内容"
 ```
 等待后台任务完成，输出会自动返回。脚本会根据 `config.json` 自动决定是直接发送还是只输入到输入框。
 
@@ -90,7 +87,7 @@ python3 skills/wxbot-skill/scripts/wechat.py chat reply Kent "拟写的回复内
 
 1. **必须先 read 再 reply** — 未读上下文不得盲目回复
 2. **默认按上下文自行拟写回复** — 用户说「回复某人」时，不要反问「要回复什么」，应读完上下文后自行拟写
-3. **前缀自动添加** — 所有回复由脚本根据 config.json 中的 `reply_prefix` 自动加前缀，Gemini 不需要写
+3. **前缀自动添加** — 所有回复由脚本根据 config.json 中的 `reply_prefix` 自动加前缀，AI Agent 不需要写
 4. **极简口语化原则** — 回复应像真人一样简短、口语化，严禁总结式、汇报式的长句。
 5. **点对点回复** — 只针对当前上下文中一个具体的、最新的观点进行回复。
 6. **你来我往** — 保持“你一言我一语”的快节奏交流感，不要长篇大论。

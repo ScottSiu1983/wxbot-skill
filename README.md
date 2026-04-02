@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">wxbot-skill</h1>
   <p align="center">
-    基于 <a href="https://gemini.google.com/">Gemini</a> 的微信桌面自动化技能
+    跨平台微信桌面自动化技能
     <br />
     本地 OCR + 键鼠模拟 · 数据不离开你的电脑
   </p>
@@ -24,7 +24,18 @@
 - **聊天回复** — 发送带前缀标识的智能回复
 - **群聊支持** — 自动识别群聊，支持提取回复引用（Quote Detection），并区分每条消息的发送者
 - **视觉识别** — 识别对话中的图片、表情包和 emoji
-- **低成本适配** — 优化 SKILL.md 指令，支持极速低成本运行
+- **跨平台兼容** — 支持 Gemini CLI、Claude Code、Antigravity、OpenClaw、Codex CLI、Cursor
+
+## 支持的 AI Agent 平台
+
+| 平台 | 支持模式 | 安装路径 |
+|------|---------|---------|
+| **Gemini CLI** | ✅ 完整技能 | `.gemini/skills/wxbot-skill/` |
+| **Claude Code** | ✅ 完整技能 | `.claude/skills/wxbot-skill/` |
+| **Antigravity** | ✅ 完整技能 | `.agents/skills/wxbot-skill/` |
+| **OpenClaw** | ✅ 完整技能 | `.openclaw/skills/wxbot-skill/` |
+| **Codex CLI** | ✅ 指令注入 | `AGENTS.md` |
+| **Cursor** | ⚠️ 规则注入 | `.cursor/rules/wxbot.mdc` |
 
 ## 环境要求
 
@@ -33,7 +44,6 @@
 | macOS | 13+（Vision Framework、AppleScript） |
 | Python | 3.10+ |
 | WeChat | Mac 桌面版 |
-| Gemini CLI | Antigravity |
 
 ### macOS 权限
 
@@ -52,19 +62,17 @@ cd wxbot-skill
 pip install -r requirements.txt
 ```
 
-### 2. 配置权限
+### 2. 一键安装到你的 AI Agent
 
-配置 Gemini CLI 授权（不会被 git 追踪）：
+```bash
+# 交互式选择平台
+./install.sh
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3:*)",
-      "Skill(wxbot-skill)"
-    ]
-  }
-}
+# 或直接指定平台
+./install.sh --platform gemini --target-dir /path/to/your/project
+
+# 安装所有平台
+./install.sh --platform all --target-dir /path/to/your/project
 ```
 
 ### 3. 自定义配置（可选）
@@ -85,11 +93,7 @@ pip install -r requirements.txt
 
 ### 4. 运行
 
-```bash
-gemini
-```
-
-然后对 Gemini 说：
+在你的 AI Agent 中说：
 
 ```
 列出微信聊天
@@ -100,7 +104,7 @@ gemini
 ## 工作原理
 
 ```
-Gemini CLI  ─→  SKILL.md（触发规则 + 工作流）
+AI Agent  ─→  SKILL.md（触发规则 + 工作流）
                     │
                     ▼
                wechat.py CLI
@@ -115,6 +119,22 @@ Gemini CLI  ─→  SKILL.md（触发规则 + 工作流）
                     ▼
     macOS: Vision · Quartz · AppleScript
 ```
+
+## 跨平台架构
+
+```
+wxbot-skill/
+├── SKILL.md                  ← 平台无关的核心技能定义
+├── scripts/                  ← 所有可执行脚本（共享）
+│   ├── wechat.py
+│   ├── computer_use.py
+│   └── local_vision.py
+├── adapters/                 ← 跨平台适配层
+│   └── scaffold.py           ← 适配器生成器
+└── install.sh                ← 一键安装脚本
+```
+
+适配器通过生成各平台专属的入口文件（SKILL.md / AGENTS.md / .mdc），将同一套核心脚本注入到不同的 AI Agent 工具中。脚本目录通过符号链接共享，无需拷贝。
 
 ## 已知限制
 
