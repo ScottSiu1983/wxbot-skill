@@ -318,19 +318,59 @@ end tell'''
                 time.sleep(SETTLE)
                 if self._verify_chat_open(name, rect): return True
             self._focused_press("escape")
-            self._click_search_bar(rect)
+            search_bar_y = self._click_search_bar(rect)
             time.sleep(0.3)
             subprocess.run(["pbcopy"], input=name.encode("utf-8"), check=True)
             self._focused_press("command+v")
-            time.sleep(3.0)
+            time.sleep(3.0)  # 等待搜索结果加载（分类渲染需要时间）
+            
             all_txt = [i for i in self._focused_screen_text("accurate") if rect[0] < i["x"] < rect[0]+rect[2]]
             all_txt.sort(key=lambda i: i["y"])
-            target = None
+            
+            # 1. 收集分类标题及其 y 轴范围
+            section_headers = []
             for i in all_txt:
-                # 排除搜索框本身（位于窗口顶部约 90 像素以内）
-                if i["y"] < rect[1] + 90:
-                    continue
-                if name.lower() in i["text"].lower().replace(" ", ""): target = i; break
+                if i["text"].strip() in ("联系人", "群聊", "聊天记录", "搜索网络结果"):
+                    section_headers.append(i)
+            section_headers.sort(key=lambda i: i["y"])
+            
+            section_ranges = {}
+            for idx, hdr in enumerate(section_headers):
+                y_end = section_headers[idx + 1]["y"] if idx + 1 < len(section_headers) else rect[1] + rect[3]
+                section_ranges[hdr["text"].strip()] = (hdr["y"], y_end)
+
+            # 2. 在“联系人”和“群聊”分区内寻找候选项
+            candidates = []
+            target = None
+            name_lower = name.lower().replace(" ", "")
+            for section_name in ("联系人", "群聊"):
+                if section_name not in section_ranges: continue
+                y_start, y_end = section_ranges[section_name]
+                # 仅在标题下方、下一标题上方的范围内查找
+                section_items = [i for i in all_txt if y_start < i["y"] < y_end]
+                section_items.sort(key=lambda i: i["y"])
+                for i in section_items:
+                    text_clean = i["text"].strip().replace(" ", "").lower()
+                    # 去除微信可能的群前缀标签
+                    text_bare = re.sub(r'[\[［].*?[\]］]', '', text_clean).strip()
+                    if name_lower in text_clean or text_clean in name_lower or name_lower in text_bare:
+                        is_exact = (name_lower == text_clean or name_lower == text_bare)
+                        candidates.append({"item": i, "section": section_name, "exact": is_exact})
+                        break # 每个分区只取首个匹配
+
+            if candidates:
+                # 排序：精确匹配优先 > 联系人分区优先
+                candidates.sort(key=lambda c: (not c["exact"], c["section"] != "联系人"))
+                target = candidates[0]["item"]
+
+            # 3. 兜底逻辑：若无标题识别，则取搜索框下方的首个包含匹配
+            if not target and not section_ranges:
+                for i in all_txt:
+                    if i["y"] <= search_bar_y + 15: continue
+                    text_clean = i["text"].strip().replace(" ", "").lower()
+                    if name_lower in text_clean or text_clean in name_lower:
+                        target = i; break
+
             if target:
                 self._focused_click(target["x"], target["y"])
                 time.sleep(1.0)
