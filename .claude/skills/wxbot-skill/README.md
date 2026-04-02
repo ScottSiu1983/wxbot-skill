@@ -7,7 +7,7 @@ A Claude Code skill that automates WeChat desktop (macOS) through local OCR and 
 - **Chat List** — List all visible conversations in the sidebar
 - **Chat Read** — Navigate to any chat and extract message history with sender attribution
 - **Chat Reply** — Send contextual replies with automatic prefix tagging
-- **Group Chat Support** — Detects group chats, identifies per-message senders by visual layout
+- **Group Chat Support** — Detects group chats, identifies per-message senders by visual layout, and extracts quoted messages (reply quotes)
 - **Visual Detection** — Classifies images, stickers, and emoji in conversations
 - **Debug Logging** — Timestamped logs + screenshots for every operation
 

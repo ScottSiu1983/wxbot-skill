@@ -925,7 +925,7 @@ end tell'''
 
         if not screenshot_path or not Path(screenshot_path).exists():
             _dbg("detect_visual: no screenshot available")
-            return [], []
+            return [], [], []
 
         wx, wy, ww, wh = rect
         cx_min = self._content_x_min(rect)
@@ -950,7 +950,7 @@ end tell'''
         # 确保图片至少有 RGB 3 通道；RGBA 则只取前 3 通道
         if arr.ndim == 2:
             _dbg("detect_visual: grayscale image, skipping")
-            return []
+            return [], [], []
         if arr.shape[2] == 4:
             arr = arr[:, :, :3]
         cs = min(10, h_px, w_px)  # 角落取样大小
@@ -1122,8 +1122,9 @@ end tell'''
 
         visual_items = []
         avatars = []
+        quote_bubbles = []
         if screenshot_path:
-            visual_items, avatars, _ = self._detect_visual_elements(screenshot_path, ocr_items, rect)
+            visual_items, avatars, quote_bubbles = self._detect_visual_elements(screenshot_path, ocr_items, rect)
 
         all_items = []
 
@@ -1171,6 +1172,38 @@ end tell'''
                 if not msg_texts:
                     continue
 
+                # ── 检测并提取引用内容 ──────────────────────────────────────────
+                current_quotes = []
+                for qb in quote_bubbles:
+                    qb_center_x = qb["x"] + qb["w"] / 2
+                    qb_center_y = qb["y"] + qb["h"] / 2
+                    if av_top <= qb_center_y <= msg_bottom:
+                        if (is_me and content_x <= qb_center_x <= av_left) or \
+                           (not is_me and av_right <= qb_center_x <= content_x_max):
+                            current_quotes.append(qb)
+                
+                quote_summary = ""
+                if current_quotes:
+                    # 将落在引用气泡内的文字提取出来
+                    quoted_parts = []
+                    remaining_msg_texts = []
+                    for iy, ix, text in msg_texts:
+                        is_inside_quote = False
+                        for qb in current_quotes:
+                            # 允许一点边距误差 (5px)
+                            if (qb["x"] - 5 <= ix <= qb["x"] + qb["w"] + 5 and 
+                                qb["y"] - 5 <= iy <= qb["y"] + qb["h"] + 5):
+                                is_inside_quote = True
+                                break
+                        if is_inside_quote:
+                            quoted_parts.append(text)
+                        else:
+                            remaining_msg_texts.append((iy, ix, text))
+                    
+                    if quoted_parts:
+                        quote_summary = f"[引用: {' '.join(quoted_parts)}]"
+                        msg_texts = remaining_msg_texts # 更新，排除已引用的文字
+
                 # 按Y排序（先出现的行在上）
                 msg_texts.sort(key=lambda x: x[0])
 
@@ -1178,6 +1211,8 @@ end tell'''
                     sender = "me"
                     # 合并文字，保留换行（Y差距>15px视为换行）
                     parts = []
+                    if quote_summary:
+                        parts.append(quote_summary + "\n")
                     for i, (iy, ix, text) in enumerate(msg_texts):
                         if i > 0 and iy - msg_texts[i-1][0] > 15:
                             parts.append("\n")
@@ -1187,11 +1222,13 @@ end tell'''
                     # 他人：第一行=nickname，其余=发言内容
                     sender = msg_texts[0][2] if msg_texts else "them"
                     body_parts = []
+                    if quote_summary:
+                        body_parts.append(quote_summary + "\n")
                     for i, (iy, ix, text) in enumerate(msg_texts[1:], start=1):
                         if i > 1 and iy - msg_texts[i-1][0] > 15:
                             body_parts.append("\n")
                         body_parts.append(text)
-                    body_texts = ["".join(body_parts)] if body_parts else []
+                    body_texts = ["".join(body_parts)] if body_parts else ([quote_summary] if quote_summary else [])
 
                 # 收集视觉元素（图片/表情）
                 msg_images = []
@@ -1272,9 +1309,10 @@ end tell'''
         recent = messages[-15:]  # 群聊需要更多上下文
         lines = [f"[OK] {name} ({len(recent)} msgs):"]
         for m in recent:
-            txt = m["text"]
-            if len(txt) > 80:
-                txt = txt[:77] + "..."
+            # 将换行符替换为空格，确保摘要中每条消息占一行
+            txt = m["text"].replace("\n", " ").strip()
+            if len(txt) > 120:  # 稍微增加摘要长度限制
+                txt = txt[:117] + "..."
             lines.append(f"  {m['sender']}: {txt}")
         return "\n".join(lines)
 
