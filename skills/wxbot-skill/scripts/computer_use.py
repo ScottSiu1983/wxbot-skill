@@ -46,8 +46,7 @@ def click(x: int, y: int, double: bool = False, right: bool = False):
 
 def type_text(text: str):
     """
-    拟人化输入文字。
-    通过 macOS 底层 CGEvent 模拟真实按键，支持中文，且带有随机击键延迟以规避机器人检测。
+    深度拟人化输入：模拟人脑思维分词、快速迸发击键与停顿纠缠态。
     """
     from Quartz import (
         CGEventCreateKeyboardEvent,
@@ -55,22 +54,45 @@ def type_text(text: str):
         CGEventPost,
         kCGHIDEventTap
     )
+    import random
+    import re
     
-    print(f"拟人化键入: {text!r}")
+    # 模拟分词：按照标点符号或随机长度切割词组 (模拟人脑逐个意群思考的过程)
+    # 我们将句子切成 1-4 个字符不等的词块
+    chunks = []
+    idx = 0
+    while idx < len(text):
+        c_len = random.choices([1, 2, 3, 4], weights=[20, 40, 30, 10])[0]
+        chunks.append(text[idx:idx+c_len])
+        idx += c_len
+
+    print(f"拟人化词组键入: {chunks}")
     
-    for char in text:
-        # 创建一个空键位的键盘事件
-        # 128 是一个不存在的虚拟键位，我们主要通过 UnicodeString 注入内容
-        event = CGEventCreateKeyboardEvent(None, 0, True)
-        # 将字符注入事件
-        CGEventKeyboardSetUnicodeString(event, len(char), char)
-        # 投递按键按下事件
-        CGEventPost(kCGHIDEventTap, event)
-        
-        # 模拟真实的打字节奏 (0.05s - 0.2s 的随机停顿)
-        time.sleep(random.uniform(0.05, 0.15))
-        
-    time.sleep(0.3) # 完成后稍作停顿以稳固输入状态
+    for chunk in chunks:
+        # --- 词组内：迸发输入 (Burst Mode) ---
+        for char in chunk:
+            # 按下
+            down = CGEventCreateKeyboardEvent(None, 0, True)
+            CGEventKeyboardSetUnicodeString(down, len(char), char)
+            CGEventPost(kCGHIDEventTap, down)
+            
+            # 极低随机延迟 (模拟由于肌肉记忆造成的连击，0.01 - 0.04s)
+            time.sleep(random.uniform(0.01, 0.04))
+            
+            # 弹起 (关键：若不弹起，长按可能会触发系统重复键逻辑)
+            up = CGEventCreateKeyboardEvent(None, 0, False)
+            CGEventPost(kCGHIDEventTap, up)
+
+        # --- 词组间：呼吸顿挫 (Rhythmic Pause) ---
+        # 模拟大脑想下一个词、或者等待输入法上屏的物理间隔
+        # 如果是标点后面，停顿更久一些
+        if chunk[-1] in "，。！？；：,.!?;:":
+            time.sleep(random.uniform(0.5, 0.9))
+        else:
+            time.sleep(random.uniform(0.08, 0.35))
+            
+    time.sleep(0.4) # 完成输入后的收手停顿
+
 
 
 
