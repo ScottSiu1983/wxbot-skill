@@ -102,6 +102,7 @@ def smooth_scroll(x: int, y: int, direction: str, distance: int = 200):
             scroll_delta
         )
         CGEventPost(kCGHIDEventTap, event)
+        # 恢复为原始的 0.01s 间隔，提供更快速的物理滚动响应
         time.sleep(0.01)
 
     # 等待 UI 刷新

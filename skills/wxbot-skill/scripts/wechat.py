@@ -201,15 +201,20 @@ end tell'''
         self._activate_wechat(); return get_screen_text(mode=mode)
 
     def _detect_absolute_layout(self, rect: tuple) -> dict:
+        """核心布局解剖：识别侧边栏、消息泳道以及各功能块坐标。"""
         if self._layout_anchors and self._window_rect_cache == rect: return self._layout_anchors
         wx, wy, ww, wh = rect
         from PIL import Image
         path = take_screenshot(); self._last_screenshot = path; img = Image.open(path)
+        img_np = np.array(img)
+        
+        # 1. 探测纵向泳道分界 (X 轴)
         scan_y_v = wy + wh // 2
         v_line_x = None
         for x in range(wx + ww // 2, wx + ww - 50):
             c_curr, c_left = img.getpixel((x, scan_y_v))[:3], img.getpixel((x-1, scan_y_v))[:3]
             if sum(abs(c1-c2) for c1,c2 in zip(c_curr, c_left)) > 15:
+                # 垂直全贯穿校验 (如 X-Ray 逻辑)
                 pts, total = 0, 0
                 for dy in range(-wh//4, wh//4, 10):
                     total += 1
@@ -218,29 +223,45 @@ end tell'''
                     except: break
                 if pts/total > 0.7: v_line_x = x; break
         if not v_line_x: v_line_x = wx + int(ww * 0.33)
+        
+        # 2. 在消息流泳道内探测横向分块 (Y 轴)
         scan_x_h = v_line_x + (wx+ww-v_line_x)//2
         h_lines = []
         for y in range(wy+20, wy+wh-20):
             c_curr, c_up = img.getpixel((scan_x_h, y))[:3], img.getpixel((scan_x_h, y-1))[:3]
             if sum(abs(c1-c2) for c1,c2 in zip(c_curr, c_up)) > 15:
+                # 水平全贯穿校验 (确保这根线划开了整个消息泳道)
                 matches, total = 0, 0
                 for tx in range(v_line_x+5, wx+ww-5, 10):
                     total += 1
-                    if sum(abs(c1-c2) for c1,c2 in zip(img.getpixel((tx,y))[:3], c_curr)) < 25: matches += 1
-                if matches/total > 0.95:
+                    # 对比整行像素
+                    try:
+                        if sum(abs(c1-c2) for c1,c2 in zip(img.getpixel((tx,y))[:3], c_curr)) < 25: matches += 1
+                    except: break
+                if matches/total > 0.9:
                     if not h_lines or y-h_lines[-1] > 5: h_lines.append(y)
+        
+        # 3. 固化命名映射：寻找最大空隙作为消息流 (Message Flow)
         bounds = [wy+30] + h_lines + [wy+wh-30]
         max_gap, bt, bb = 0, wy+60, wy+wh-130
         for i in range(len(bounds)-1):
-            if bounds[i+1]-bounds[i] > max_gap: max_gap = bounds[i+1]-bounds[i]; bt, bb = bounds[i], bounds[i+1]
-        anchors = {'content_x_min': v_line_x, 'content_x_max': wx+ww, 'content_y_min': bt+2, 'content_y_max': bb-2}
-        self._layout_anchors, self._window_rect_cache = anchors, rect
-        _dbg(f"Layout: V_X={v_line_x}, Y={bt+2}-{bb-2}")
-        return anchors
+            gap = bounds[i+1]-bounds[i]
+            if gap > max_gap: 
+                max_gap = gap; bt, bb = bounds[i], bounds[i+1]
+        
+        layout = {
+            'v_divide_x': v_line_x,
+            'title_bar': (wy, bt),        # 标题栏范围
+            'message_flow': (bt+2, bb-2),   # 消息流对话区范围
+            'input_box': (bb, wy+wh)      # 输入框范围
+        }
+        self._layout_anchors, self._window_rect_cache = layout, rect
+        _dbg(f"Layout SELECTED: X={v_line_x}, Y={layout['message_flow']}")
+        return layout
 
-    def _content_x_min(self, rect): return self._detect_absolute_layout(rect)['content_x_min']
-    def _detect_content_y_min(self, rect): return self._detect_absolute_layout(rect)['content_y_min']
-    def _detect_content_y_max(self, rect): return self._detect_absolute_layout(rect)['content_y_max']
+    def _content_x_min(self, rect): return self._detect_absolute_layout(rect)['v_divide_x']
+    def _detect_content_y_min(self, rect): return self._detect_absolute_layout(rect)['message_flow'][0]
+    def _detect_content_y_max(self, rect): return self._detect_absolute_layout(rect)['message_flow'][1]
     def _chatlist_x_range(self, rect): return (rect[0]+SIDEBAR_W, self._content_x_min(rect))
 
     def _click_search_bar(self, rect):
@@ -441,7 +462,8 @@ end tell'''
         xmin, xmax = self._content_x_min(rect), rect[0]+rect[2]
         ymin, ymax = self._detect_content_y_min(rect), self._detect_content_y_max(rect)
         for _ in range(pages):
-            _cu.smooth_scroll(xmin+(xmax-xmin)//2, ymin+(ymax-ymin)//2, dir, distance=int((ymax-ymin)*0.95))
+            # 将滚动幅度调整为消息流区域高度的 90% (0.9)，配合 slower scroll 减震
+            _cu.smooth_scroll(xmin+(xmax-xmin)//2, ymin+(ymax-ymin)//2, dir, distance=int((ymax-ymin)*0.90))
             time.sleep(1.0)
 
     def chat_read(self, name: str) -> str:
